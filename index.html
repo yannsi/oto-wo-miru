@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>音を見る</title>
+<!--
+  音を見る（音でデータを送る・第1段階）
+  ------------------------------------------------------------
+  マイクの音を「スペクトログラム」で表示するページです。
+    縦 … 音の高さ（周波数 Hz）　下が低い音、上が高い音
+    横 … 時間（右端が「いま」、左へ流れていく）
+    明るさ … その高さの音の強さ
+  あわせて、第2段階で使う「0の音」「1の音」を鳴らす機能もあります。
+
+  使い方
+    PC   : このファイルを Chrome で開く（ダブルクリックでOK）
+    iPhone: GitHub Pages など https のページに置いて開く
+            （マイクは https か、PCのローカルファイルでしか使えません）
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@400;700&family=BIZ+UDPGothic:wght@400;700&display=swap">
+<style>
+/* レイアウト: 上に操作、中央に計測器のような暗いスペクトログラム、下にテスト音と観察メモ */
+:root{
+  --bg:#eef2f1;        /* ページの地 */
+  --surface:#ffffff;   /* 操作パネル */
+  --fg:#1b2321;        /* 文字 */
+  --muted:#5a6764;     /* 補足の文字 */
+  --line:#d3dbd9;      /* 区切り線 */
+  --accent:#0d7366;    /* ボタン（青緑） */
+  --accent-fg:#ffffff;
+  --tone:#b0521c;      /* テスト音が鳴っている時の色 */
+  --scope:#0a100f;     /* スペクトログラムの地（両テーマ共通で暗い） */
+  --scope-fg:#c9ddd8;  /* スペクトログラム上の目盛り文字 */
+  --font-ui:"BIZ UDPGothic","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  --font-num:"BIZ UDGothic",ui-monospace,"Menlo","Consolas",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+    --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+    --scope:#050908; --scope-fg:#c9ddd8; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+  --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+  --scope:#050908; --scope-fg:#c9ddd8; color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:var(--font-ui); font-size:15px; line-height:1.7;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  padding-block:max(16px, env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-bottom, 0px));
+}
+.wrap{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+header{display:flex; flex-direction:column; gap:2px}
+h1{font-size:1.5rem; margin:0; letter-spacing:.04em; text-wrap:balance}
+.lead{margin:0; color:var(--muted); font-size:.92rem}
+h2{font-size:1rem; margin:0; letter-spacing:.04em}
+
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px}
+.row{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+
+button{
+  font:inherit; font-weight:700; cursor:pointer;
+  border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg);
+  border-radius:8px; padding:9px 14px; min-height:44px;
+}
+button.sub{background:transparent; color:var(--accent)}
+button[aria-pressed="true"]{background:var(--accent); color:var(--accent-fg)}
+button:disabled{opacity:.45; cursor:default}
+button:focus-visible, input:focus-visible{outline:3px solid var(--tone); outline-offset:2px}
+
+.readout{display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:10px}
+.cell{display:flex; flex-direction:column; gap:0; min-width:0}
+.label{font-size:.75rem; color:var(--muted); letter-spacing:.06em}
+.value{font-family:var(--font-num); font-size:1.6rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.2}
+.value small{font-size:.9rem; font-weight:400; color:var(--muted); margin-left:4px}
+
+/* スペクトログラム */
+.scope{position:relative; background:var(--scope); border-radius:10px; overflow:hidden; height:300px}
+.scope canvas{position:absolute; inset:0; width:100%; height:100%; display:block}
+.ticks{position:absolute; inset:0; pointer-events:none}
+.tick{position:absolute; left:0; right:0; border-top:1px dashed rgba(201,221,216,.18)}
+.tick span{position:absolute; left:6px; top:-0.75em; font-family:var(--font-num); font-size:11px; color:var(--scope-fg); background:var(--scope); padding:0 4px; border-radius:3px; font-variant-numeric:tabular-nums}
+.peak{position:absolute; right:0; width:46px; border-top:2px solid var(--tone); transition:top .08s linear}
+.peak[hidden]{display:none!important}
+.idle{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:16px; color:var(--scope-fg); font-size:.95rem}
+.axisnote{display:flex; justify-content:space-between; gap:8px; font-size:.75rem; color:var(--muted)}
+
+.msg{margin:0; font-size:.9rem; color:var(--tone)}
+.msg:empty{display:none}
+
+.slider{display:flex; flex-direction:column; gap:4px; flex:1 1 220px; min-width:0}
+input[type=range]{width:100%; accent-color:var(--accent)}
+.playing{font-family:var(--font-num); color:var(--tone); font-weight:700}
+
+ol.watch{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:6px}
+ol.watch b{color:var(--accent)}
+.note{font-size:.85rem; color:var(--muted); margin:0}
+
+@media (prefers-reduced-motion: reduce){ .peak{transition:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>音を見る</h1>
+    <p class="lead">音でデータを送る・第1段階　マイクの音を、高さ・時間・強さの図にします</p>
+  </header>
+
+  <section class="panel" aria-label="操作">
+    <div class="row">
+      <button id="btnMic">マイクを開始</button>
+      <button id="btnPause" class="sub" disabled aria-pressed="false">一時停止</button>
+    </div>
+    <div class="row" role="group" aria-label="表示する高さの範囲">
+      <span class="label">表示範囲</span>
+      <button class="sub range" data-max="4000" aria-pressed="false">〜4kHz</button>
+      <button class="sub range" data-max="8000" aria-pressed="true">〜8kHz</button>
+      <button class="sub range" data-max="20000" aria-pressed="false">〜20kHz</button>
+    </div>
+    <p class="msg" id="msg" role="status"></p>
+  </section>
+
+  <section class="readout" aria-label="計測値">
+    <div class="cell"><span class="label">いちばん強い音の高さ</span><span class="value" id="peakHz">—<small>Hz</small></span></div>
+    <div class="cell"><span class="label">その強さ（0〜255）</span><span class="value" id="peakLv">—</span></div>
+    <div class="cell"><span class="label">1マスの細かさ</span><span class="value" id="binHz">—<small>Hz</small></span></div>
+  </section>
+
+  <div>
+    <div class="scope" id="scope">
+      <canvas id="spec" aria-label="スペクトログラム"></canvas>
+      <div class="ticks" id="ticks"></div>
+      <div class="peak" id="peakMark" hidden></div>
+      <div class="idle" id="idle">「マイクを開始」を押して、声を出したり口笛を吹いたりしてみてください</div>
+    </div>
+    <div class="axisnote"><span>← 過去</span><span>縦＝高さ／明るさ＝強さ</span><span>いま →</span></div>
+  </div>
+
+  <section class="panel" aria-label="テスト音">
+    <h2>テスト音（第2段階の準備）</h2>
+    <p class="note">別の端末で鳴らすと、こちらの図に1本の線が出ます。同じ端末でも映りますが、弱く出ることがあります。</p>
+    <div class="row">
+      <button id="btn0" class="sub">「0」の音　1800Hz</button>
+      <button id="btn1" class="sub">「1」の音　2400Hz</button>
+      <button id="btnStop" class="sub">止める</button>
+    </div>
+    <div class="row">
+      <div class="slider">
+        <label class="label" for="freq">好きな高さ：<span id="freqLabel" class="playing">1000Hz</span></label>
+        <input id="freq" type="range" min="200" max="20000" step="10" value="1000">
+      </div>
+      <button id="btnFree" class="sub">この高さで鳴らす</button>
+    </div>
+    <p class="note">鳴っている音：<span id="nowTone" class="playing">なし</span></p>
+  </section>
+
+  <section class="panel" aria-label="観察のしかた">
+    <h2>観察してみよう</h2>
+    <ol class="watch">
+      <li><b>口笛</b>を吹く → 細い線が1本。高さを変えると線が上下します。これが「純音」に近い音です。</li>
+      <li><b>「あー」と声</b>を出す → 等間隔の線が何本も重なります。いちばん下が声の高さ、上の線は「倍音」です。</li>
+      <li><b>手を1回たたく</b> → 一瞬だけ縦に長い線。短い音は、たくさんの高さを同時に含んでいます。</li>
+      <li><b>テスト音の0と1</b>を交互に鳴らす → 2つの高さを行き来する線。次の段階では、この線の位置を読み取って0と1に戻します。</li>
+      <li>〜20kHzにして<b>高い音</b>を鳴らす → 自分の耳で聞こえなくなる高さでも、図には線が残るか確かめてください。</li>
+    </ol>
+  </section>
+
+</div>
+
+<script>
+/* ============================================================
+   音を見る — しくみ
+   1. マイクの音を AudioContext（ブラウザの音の作業台）に取り込む
+   2. AnalyserNode が FFT（高速フーリエ変換）で
+      「いまの音には、どの高さが、どれくらい強く入っているか」を計算する
+   3. その結果を1列ずつ右端に描き、古い列は左へずらす
+   ============================================================ */
+
+const $ = (id) => document.getElementById(id);
+
+// ---- 調整できる値 -------------------------------------------
+const FFT_SIZE  = 4096;  // 大きいほど細かい高さまで分かるが、反応が遅くなる（2の累乗）
+const SMOOTHING = 0.2;   // 0〜1。大きいほど表示がなめらか（ただし変化がぼやける）
+const PEAK_MIN  = 90;    // この強さ（0〜255）未満は「音なし」とみなす
+const COL_PX    = 2;     // 1回に描く列の幅（CSSピクセル）
+const TONE_VOL  = 0.25;  // テスト音の音量（0〜1）
+
+// ---- 状態 ---------------------------------------------------
+let ctx = null;          // AudioContext
+let analyser = null;     // AnalyserNode
+let micStream = null;    // マイクの入力
+let freqData = null;     // 周波数ごとの強さ（0〜255）が入る配列
+let running = false;     // マイクが動いているか
+let paused = false;      // 一時停止中か
+let maxHz = 8000;        // 図の一番上の高さ
+let osc = null, oscGain = null; // テスト音
+
+const canvas = $('spec');
+const g = canvas.getContext('2d');
+
+// ---- 色の対応表（強さ0〜255 → 色）---------------------------
+// 暗い青緑 → 青緑 → 黄 → 白 と明るくなる。強い音ほど目立つ。
+const LUT = (() => {
+  const stops = [
+    [0,   [10, 16, 15]],
+    [70,  [14, 60, 74]],
+    [130, [20, 150, 135]],
+    [190, [235, 200, 70]],
+    [255, [255, 255, 240]],
+  ];
+  const lut = new Array(256);
+  for (let v = 0; v < 256; v++) {
+    let i = 0;
+    while (i < stops.length - 2 && v > stops[i + 1][0]) i++;
+    const [v0, c0] = stops[i], [v1, c1] = stops[i + 1];
+    const t = (v - v0) / (v1 - v0);
+    lut[v] = c0.map((c, k) => Math.round(c + (c1[k] - c) * t));
+  }
+  return lut;
+})();
+
+// ---- 画面のサイズ合わせ -------------------------------------
+function fitCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(r.width * dpr));
+  canvas.height = Math.max(1, Math.round(r.height * dpr));
+  clearScope();
+}
+function clearScope() {
+  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--scope').trim() || '#0a100f';
+  g.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+// ---- 目盛り（縦軸の Hz）-------------------------------------
+function drawTicks() {
+  const box = $('ticks');
+  box.textContent = '';
+  const step = maxHz <= 4000 ? 500 : maxHz <= 8000 ? 1000 : 2000;
+  for (let hz = step; hz < maxHz; hz += step) {
+    const d = document.createElement('div');
+    d.className = 'tick';
+    d.style.top = (100 - (hz / maxHz) * 100) + '%';  // 下が低い音なので反転
+    const s = document.createElement('span');
+    s.textContent = hz >= 1000 ? (hz / 1000) + 'k' : String(hz);
+    d.appendChild(s);
+    box.appendChild(d);
+  }
+}
+
+// ---- AudioContext を用意（ボタンを押した時にだけ作れる）------
+function ensureCtx() {
+  if (!ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+  }
+  return ctx;
+}
+
+// ---- マイク開始・停止 ---------------------------------------
+async function startMic() {
+  showMsg('');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showMsg('このページではマイクが使えません。https のページに置くか、PCのChromeでファイルを開いてください。');
+    return;
+  }
+  ensureCtx();
+  await ctx.resume();
+  try {
+    // 声用の加工（エコー除去・雑音除去・音量自動調整）を切る。
+    // 切らないと、テスト音のような一定の音が「雑音」として消されてしまう。
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+  } catch (e) {
+    if (e.name === 'NotAllowedError') showMsg('マイクの使用が許可されませんでした。ブラウザのアドレス欄のマイク表示から許可してください。');
+    else if (e.name === 'NotFoundError') showMsg('マイクが見つかりません。マイクがつながっているか確認してください。');
+    else showMsg('マイクを開けませんでした（' + e.name + '）。');
+    return;
+  }
+
+  const src = ctx.createMediaStreamSource(micStream);
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = FFT_SIZE;
+  analyser.smoothingTimeConstant = SMOOTHING;
+  analyser.minDecibels = -100;   // これより小さい音は 0
+  analyser.maxDecibels = -20;    // これより大きい音は 255
+  src.connect(analyser);         // スピーカーにはつながない（ハウリング防止）
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+
+  // 1マス（1つのビン）の幅 = サンプリング周波数 ÷ FFTの大きさ
+  $('binHz').innerHTML = (ctx.sampleRate / FFT_SIZE).toFixed(1) + '<small>Hz</small>';
+
+  // 表示範囲は、扱える上限（サンプリング周波数の半分）を超えない
+  updateRangeButtons();
+
+  running = true; paused = false;
+  $('idle').hidden = true;
+  $('btnMic').textContent = 'マイクを止める';
+  $('btnPause').disabled = false;
+  $('btnPause').setAttribute('aria-pressed', 'false');
+  $('btnPause').textContent = '一時停止';
+  requestAnimationFrame(loop);
+}
+
+function stopMic() {
+  running = false;
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  micStream = null; analyser = null;
+  $('btnMic').textContent = 'マイクを開始';
+  $('btnPause').disabled = true;
+  $('peakMark').hidden = true;
+  $('peakHz').innerHTML = '—<small>Hz</small>';
+  $('peakLv').textContent = '—';
+}
+
+// ---- 毎フレームの処理 ---------------------------------------
+function loop() {
+  if (!running) return;
+  if (!paused) {
+    analyser.getByteFrequencyData(freqData);  // FFTの結果を受け取る
+    drawColumn();
+    showPeak();
+  }
+  requestAnimationFrame(loop);
+}
+
+// 右端に新しい1列を描き、それまでの絵を左へずらす
+function drawColumn() {
+  const w = canvas.width, h = canvas.height;
+  const dpr = window.devicePixelRatio || 1;
+  const col = Math.max(1, Math.round(COL_PX * dpr));
+  const binHz = ctx.sampleRate / FFT_SIZE;
+
+  g.drawImage(canvas, -col, 0);               // 左へずらす
+
+  const img = g.createImageData(col, h);
+  const px = img.data;
+  for (let y = 0; y < h; y++) {
+    const hz = (1 - y / h) * maxHz;           // 上ほど高い音
+    const bin = Math.min(freqData.length - 1, Math.round(hz / binHz));
+    const c = LUT[freqData[bin]];
+    for (let x = 0; x < col; x++) {
+      const i = (y * col + x) * 4;
+      px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, w - col, 0);
+}
+
+// いちばん強い高さを探して表示する
+function showPeak() {
+  const binHz = ctx.sampleRate / FFT_SIZE;
+  const top = Math.min(freqData.length - 2, Math.floor(maxHz / binHz));
+  let best = 0, bi = -1;
+  for (let i = 3; i <= top; i++) {            // 0付近（直流成分）は飛ばす
+    if (freqData[i] > best) { best = freqData[i]; bi = i; }
+  }
+  const mark = $('peakMark');
+  if (bi < 0 || best < PEAK_MIN) {
+    $('peakHz').innerHTML = '—<small>Hz</small>';
+    $('peakLv').textContent = best ? String(best) : '—';
+    mark.hidden = true;
+    return;
+  }
+  // 放物線補間：となりのマスの強さから、マスの間の本当の位置を推定する。
+  // これで「1マスの細かさ」より細かく高さが分かる。
+  const a = freqData[bi - 1], b = freqData[bi], c = freqData[bi + 1];
+  const denom = a - 2 * b + c;
+  const shift = denom ? 0.5 * (a - c) / denom : 0;
+  const hz = (bi + shift) * binHz;
+
+  $('peakHz').innerHTML = Math.round(hz) + '<small>Hz</small>';
+  $('peakLv').textContent = String(best);
+  mark.hidden = false;
+  mark.style.top = (100 - (hz / maxHz) * 100) + '%';
+}
+
+// ---- 表示範囲 -----------------------------------------------
+function updateRangeButtons() {
+  const nyquist = ctx ? ctx.sampleRate / 2 : 24000;
+  document.querySelectorAll('.range').forEach(b => {
+    const m = Number(b.dataset.max);
+    b.disabled = m > nyquist;
+    b.setAttribute('aria-pressed', String(m === maxHz));
+  });
+}
+document.querySelectorAll('.range').forEach(b => {
+  b.addEventListener('click', () => {
+    maxHz = Number(b.dataset.max);
+    updateRangeButtons();
+    clearScope();
+    drawTicks();
+  });
+});
+
+// ---- テスト音 -----------------------------------------------
+async function playTone(hz) {
+  ensureCtx();
+  await ctx.resume();
+  stopTone();
+  osc = ctx.createOscillator();
+  osc.type = 'sine';                          // きれいな1つの高さの音（純音）
+  osc.frequency.value = hz;
+  oscGain = ctx.createGain();
+  const t = ctx.currentTime;
+  oscGain.gain.setValueAtTime(0, t);
+  oscGain.gain.linearRampToValueAtTime(TONE_VOL, t + 0.03); // 急に鳴らすと「プツッ」と鳴るので少しずつ
+  osc.connect(oscGain).connect(ctx.destination);
+  osc.start();
+  $('nowTone').textContent = hz + 'Hz';
+}
+function stopTone() {
+  if (!osc) return;
+  const t = ctx.currentTime;
+  oscGain.gain.cancelScheduledValues(t);
+  oscGain.gain.setValueAtTime(oscGain.gain.value, t);
+  oscGain.gain.linearRampToValueAtTime(0, t + 0.03);
+  osc.stop(t + 0.05);
+  osc = null; oscGain = null;
+  $('nowTone').textContent = 'なし';
+}
+
+// ---- 画面の操作 ---------------------------------------------
+function showMsg(text) { $('msg').textContent = text; }
+
+$('btnMic').addEventListener('click', () => running ? stopMic() : startMic());
+$('btnPause').addEventListener('click', () => {
+  paused = !paused;
+  $('btnPause').setAttribute('aria-pressed', String(paused));
+  $('btnPause').textContent = paused ? '再開' : '一時停止';
+});
+$('btn0').addEventListener('click', () => playTone(1800));
+$('btn1').addEventListener('click', () => playTone(2400));
+$('btnStop').addEventListener('click', stopTone);
+$('freq').addEventListener('input', e => { $('freqLabel').textContent = e.target.value + 'Hz'; });
+$('btnFree').addEventListener('click', () => playTone(Number($('freq').value)));
+
+window.addEventListener('resize', fitCanvas);
+
+// ---- はじめの表示 -------------------------------------------
+fitCanvas();
+drawTicks();
+if (!window.isSecureContext) {
+  showMsg('このページは https ではないため、マイクが使えない可能性があります。');
+}
+</script>
+</body>
+</html>
