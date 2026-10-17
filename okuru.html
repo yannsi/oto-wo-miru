@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>音で文字を送る</title>
+<!--
+  音で文字を送る（音でデータを送る・第2段階）
+  ------------------------------------------------------------
+  文字 → 0と1 → 音 → 空気 → マイク → 0と1 → 文字
+  という流れを、ブラウザだけで行うページです。
+
+  送り方（FSK という方式）
+    0 = 低い音（1800Hz）、1 = 高い音（2400Hz）
+    最初に「合図の音」を0.4秒鳴らす。合図の高さで速さも伝える
+      ゆっくり 1000Hz（1ビット0.05秒）
+      ふつう   1200Hz（1ビット0.03秒）
+      はやい   1400Hz（1ビット0.02秒）
+
+  ひとまとまりの形（フレーム）
+    [合図] [同期 10100101] [長さ] [文字のバイト…] [検査（CRC-8）]
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@400;700&family=BIZ+UDPGothic:wght@400;700&display=swap">
+<style>
+/* レイアウト: 上で「送る／受け取る」を切り替え、下に各パネル。第1段階と同じ色と書体 */
+:root{
+  --bg:#eef2f1; --surface:#ffffff; --fg:#1b2321; --muted:#5a6764; --line:#d3dbd9;
+  --accent:#0d7366; --accent-fg:#ffffff; --tone:#b0521c;
+  --bit0:#2f6fb0;      /* 0の音（低い）*/
+  --bit1:#b0521c;      /* 1の音（高い）*/
+  --sig:#7a5bb5;       /* 合図の音 */
+  --ok:#1f7a3d; --ng:#b3261e;
+  --chip:#f3f6f5;
+  --flash:#ffe08a;
+  --font-ui:"BIZ UDPGothic","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  --font-num:"BIZ UDGothic",ui-monospace,"Menlo","Consolas",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+    --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+    --bit0:#6fa8e0; --bit1:#e88a55; --sig:#b39ae6; --ok:#5cc47e; --ng:#f07a72;
+    --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+  --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+  --bit0:#6fa8e0; --bit1:#e88a55; --sig:#b39ae6; --ok:#5cc47e; --ng:#f07a72;
+  --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:var(--font-ui); font-size:15px; line-height:1.7;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  padding-block:max(16px, env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-bottom, 0px));
+  transition:background-color .15s;
+}
+body.flash{background:var(--flash)}
+.wrap{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+header{display:flex; flex-direction:column; gap:2px}
+.crumb{font-size:.85rem}
+.crumb a{color:var(--accent)}
+h1{font-size:1.5rem; margin:0; letter-spacing:.04em; text-wrap:balance}
+.lead{margin:0; color:var(--muted); font-size:.92rem}
+h2{font-size:1rem; margin:0; letter-spacing:.04em}
+
+.tabs{display:grid; grid-template-columns:1fr 1fr; gap:0; border:1px solid var(--accent); border-radius:10px; overflow:hidden}
+.tabs button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:48px; font-size:1rem}
+.tabs button[aria-selected="true"]{background:var(--accent); color:var(--accent-fg)}
+
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0}
+.row{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+.label{font-size:.75rem; color:var(--muted); letter-spacing:.06em}
+.note{font-size:.85rem; color:var(--muted); margin:0}
+
+button{
+  font:inherit; font-weight:700; cursor:pointer;
+  border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg);
+  border-radius:8px; padding:9px 14px; min-height:44px;
+}
+button.sub{background:transparent; color:var(--accent)}
+button.chipbtn{min-height:36px; padding:4px 10px; font-weight:400; font-size:.9rem}
+button:disabled{opacity:.45; cursor:default}
+button:focus-visible, textarea:focus-visible, input:focus-visible{outline:3px solid var(--tone); outline-offset:2px}
+
+.seg{display:inline-grid; grid-auto-flow:column; border:1px solid var(--accent); border-radius:8px; overflow:hidden}
+.seg button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:40px; padding:6px 12px; font-weight:400}
+.seg button[aria-pressed="true"]{background:var(--accent); color:var(--accent-fg); font-weight:700}
+
+textarea{
+  width:100%; font:inherit; font-size:1.25rem; line-height:1.5; padding:10px 12px;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); resize:vertical; min-height:3.2em;
+}
+.count{font-family:var(--font-num); font-variant-numeric:tabular-nums; font-size:.9rem}
+.count.over{color:var(--ng); font-weight:700}
+
+/* フレームの図（バイトごとのチップ） */
+.frame{display:flex; flex-wrap:wrap; gap:6px}
+.byte{display:flex; flex-direction:column; align-items:center; gap:0; padding:4px 6px; border-radius:6px; background:var(--chip); border:1px solid var(--line); min-width:0}
+.byte .bl{font-size:.7rem; color:var(--muted); letter-spacing:.04em}
+.byte .bb{font-family:var(--font-num); font-size:.82rem; letter-spacing:.06em; white-space:nowrap}
+.byte .bb .b0{color:var(--bit0)}
+.byte .bb .b1{color:var(--bit1)}
+.byte.sig{border-color:var(--sig)}
+.byte.sig .bb{color:var(--sig)}
+.byte.ch .bl{color:var(--fg); font-size:.85rem; font-weight:700}
+.byte.now{outline:2px solid var(--tone); outline-offset:1px}
+.byte.done{opacity:.55}
+.legend{display:flex; flex-wrap:wrap; gap:14px; font-size:.8rem; color:var(--muted)}
+.legend span::before{content:""; display:inline-block; width:.8em; height:.8em; border-radius:2px; margin-right:4px; vertical-align:-1px; background:currentColor}
+.legend .l0{color:var(--bit0)} .legend .l1{color:var(--bit1)} .legend .ls{color:var(--sig)}
+.legend b{color:var(--muted); font-weight:400}
+
+.result{border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--bg); display:flex; flex-direction:column; gap:2px}
+.result:empty{display:none}
+
+/* 受け取る側 */
+.status{display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:999px; border:1px solid var(--line); font-weight:700; font-size:.9rem}
+.status::before{content:""; width:.6em; height:.6em; border-radius:50%; background:var(--muted)}
+.status[data-s="listen"]::before{background:var(--accent)}
+.status[data-s="sig"]::before, .status[data-s="recv"]::before{background:var(--tone)}
+.status[data-s="ok"]::before{background:var(--ok)}
+.status[data-s="ng"]::before{background:var(--ng)}
+
+.meters{display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center}
+.meter{height:12px; background:var(--chip); border-radius:6px; overflow:hidden; border:1px solid var(--line)}
+.meter i{display:block; height:100%; width:0%; transition:width .06s linear}
+.m-s i{background:var(--sig)} .m-0 i{background:var(--bit0)} .m-1 i{background:var(--bit1)}
+.progress{height:6px; background:var(--chip); border-radius:3px; overflow:hidden}
+.progress i{display:block; height:100%; width:0%; background:var(--tone)}
+
+.big{font-size:clamp(1.8rem, 7vw, 3rem); font-weight:700; line-height:1.3; word-break:break-all; min-height:1.3em; text-wrap:balance}
+.big.wait{color:var(--muted); font-size:1.1rem; font-weight:400}
+.meta{font-size:.85rem; color:var(--muted)}
+.meta .ok{color:var(--ok); font-weight:700}
+.meta .ng{color:var(--ng); font-weight:700}
+
+ul.hist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px}
+ul.hist li{display:flex; gap:10px; align-items:baseline; border-bottom:1px solid var(--line); padding:4px 0; min-width:0}
+ul.hist time{font-family:var(--font-num); font-size:.8rem; color:var(--muted); flex:none; font-variant-numeric:tabular-nums}
+ul.hist span{word-break:break-all; min-width:0}
+ul.hist .ng{color:var(--ng)}
+
+.check{display:flex; align-items:center; gap:8px; font-size:.9rem}
+.check input{width:20px; height:20px; accent-color:var(--accent)}
+.msg{margin:0; font-size:.9rem; color:var(--ng)}
+.msg:empty{display:none}
+
+ol.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4px; font-size:.92rem}
+
+@media (prefers-reduced-motion: reduce){ body, .meter i{transition:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="crumb"><a href="./">← 第1段階　音を見る</a></div>
+    <h1>音で文字を送る</h1>
+    <p class="lead">音でデータを送る・第2段階　文字を「低い音＝0」「高い音＝1」に変えて、別の端末へ届けます</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="使い方の切り替え">
+    <button role="tab" id="tabSend" aria-selected="true" aria-controls="pSend">送る</button>
+    <button role="tab" id="tabRecv" aria-selected="false" aria-controls="pRecv">受け取る</button>
+  </div>
+
+  <!-- ===================== 送る ===================== -->
+  <section id="pSend" role="tabpanel" aria-labelledby="tabSend" class="wrap" style="gap:16px">
+    <div class="panel">
+      <label class="label" for="txt">送る文字</label>
+      <textarea id="txt" maxlength="60" rows="2">12番</textarea>
+      <div class="row">
+        <span class="label">例</span>
+        <button class="sub chipbtn ex">12番</button>
+        <button class="sub chipbtn ex">OK</button>
+        <button class="sub chipbtn ex">こんにちは</button>
+        <button class="sub chipbtn ex">診察室2へどうぞ</button>
+      </div>
+      <div class="row">
+        <span class="label">速さ</span>
+        <div class="seg" role="group" aria-label="速さ" id="speedSeg"></div>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="row">
+        <button id="btnSend">音で送る</button>
+        <button id="btnStopSend" class="sub" disabled>止める</button>
+        <button id="btnLoop" class="sub">この端末だけで確かめる</button>
+      </div>
+      <p class="msg" id="sendMsg" role="status"></p>
+      <div class="result" id="loopResult" aria-live="polite"></div>
+    </div>
+
+    <div class="panel">
+      <h2>音になる前の形</h2>
+      <p class="note">送る文字は、このように0と1の並びに変わってから音になります。送っている間は、いま鳴っている部分に枠が付きます。</p>
+      <div class="legend"><span class="ls">合図の音</span><span class="l0">0＝低い音</span><span class="l1">1＝高い音</span><b>日本語は1文字＝3バイト、英数字は1バイト</b></div>
+      <div class="frame" id="frame"></div>
+    </div>
+  </section>
+
+  <!-- ===================== 受け取る ===================== -->
+  <section id="pRecv" role="tabpanel" aria-labelledby="tabRecv" class="wrap" style="gap:16px" hidden>
+    <div class="panel">
+      <div class="row">
+        <button id="btnListen">受け取りを開始</button>
+        <span class="status" id="status" data-s="off">止まっています</span>
+      </div>
+      <label class="check"><input type="checkbox" id="optFlash" checked> 受け取ったら画面を光らせる</label>
+      <p class="msg" id="recvMsg" role="alert"></p>
+      <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+      <div class="big wait" id="big" aria-live="assertive">ここに受け取った文字が出ます</div>
+      <div class="meta" id="meta"></div>
+    </div>
+
+    <div class="panel">
+      <h2>いま聞こえている音</h2>
+      <div class="meters">
+        <span class="label">合図</span><div class="meter m-s"><i id="mS"></i></div>
+        <span class="label">0の音</span><div class="meter m-0"><i id="m0"></i></div>
+        <span class="label">1の音</span><div class="meter m-1"><i id="m1"></i></div>
+      </div>
+      <p class="note">送っている間は、0と1のバーが交互に伸びます。合図のバーが伸びたら受け取りが始まります。</p>
+    </div>
+
+    <div class="panel">
+      <h2>受け取った記録</h2>
+      <ul class="hist" id="hist"><li><span class="note">まだありません</span></li></ul>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="試し方">
+    <h2>試し方</h2>
+    <ol class="how">
+      <li>まず「この端末だけで確かめる」を押します。雑音を混ぜた音を、この端末の中だけで送って読み戻します。</li>
+      <li>次に、2台で試します。1台目で「受け取る」を開いて「受け取りを開始」を押し、2台目で「送る」から「音で送る」を押します。</li>
+      <li>うまくいかないときは、端末を近づける、音量を上げる、速さを「ゆっくり」にする、の順に試してください。速さは合図の音で伝わるので、受け取る側で選ぶ必要はありません。</li>
+    </ol>
+    <p class="note">iPhoneはウェブページから振動させられないため、受け取った合図は画面の光で知らせます。受け取り中の端末から送ると、音が小さくなることがあります。</p>
+  </section>
+
+</div>
+
+<script>
+// ===CORE START===
+/* ============================================================
+   しくみの中心（画面とは関係ない計算の部分）
+   ============================================================ */
+
+const F0 = 1800;            // 0 の音（Hz）
+const F1 = 2400;            // 1 の音（Hz）
+const SPEEDS = [            // 速さごとの「1ビットの長さ」と「合図の高さ」
+  { id: 'slow',   name: 'ゆっくり', T: 0.050, fs: 1000 },
+  { id: 'normal', name: 'ふつう',   T: 0.030, fs: 1200 },
+  { id: 'fast',   name: 'はやい',   T: 0.020, fs: 1400 },
+];
+const START_SEC = 0.40;     // 合図の長さ（秒）
+const SYNC = 0xA5;          // 同期の目印 10100101（ここから本文が始まると分かる）
+const MAX_LEN = 60;         // 送れる最大バイト数
+const AMP = 0.5;            // 音の大きさ（0〜1）
+const MIN_RMS = 0.0008;     // これより小さい音は無視する
+
+// ---- 検査用の数（CRC-8）----------------------------------------
+// 届いたデータが途中で壊れていないかを確かめるための「合計」のようなもの。
+// 送る側が計算して最後に付け、受け取る側も同じ計算をして一致するかを見る。
+function crc8(bytes) {
+  let c = 0;
+  for (const b of bytes) {
+    c ^= b;
+    for (let i = 0; i < 8; i++) c = (c & 0x80) ? ((c << 1) ^ 0x07) & 0xff : (c << 1) & 0xff;
+  }
+  return c;
+}
+
+// 文字のバイト列 → フレーム（同期・長さ・本文・検査）
+function frameBytes(payload) {
+  const body = [payload.length, ...payload];
+  return [SYNC, ...body, crc8(body)];
+}
+
+// バイト → 0と1（上の桁から順に）
+function bytesToBits(bytes) {
+  const bits = [];
+  for (const b of bytes) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+  return bits;
+}
+function bitsToByte(bits, at) {
+  let v = 0;
+  for (let i = 0; i < 8; i++) v = (v << 1) | bits[at + i];
+  return v;
+}
+
+// ---- 0と1 → 音の波 ------------------------------------------
+// 音の高さを切り替えるときに波を途切れさせない（位相をつなぐ）ので、
+// 「プツッ」という雑音が出にくく、受け取る側も読みやすい。
+function synthesize(bits, sr, sp) {
+  const nStart = Math.round(START_SEC * sr);
+  const edge = (i) => nStart + Math.round(i * sp.T * sr);   // i 番目のビットが始まる位置
+  const nEnd = edge(bits.length);
+  const nTail = Math.round(0.05 * sr);                       // 最後に少し余韻を付ける
+  const ramp = Math.round(0.01 * sr);
+  const out = new Float32Array(nEnd + nTail);
+  let phase = 0, bi = 0;
+  for (let n = 0; n < out.length; n++) {
+    let f;
+    if (n < nStart) f = sp.fs;
+    else if (n < nEnd) { while (n >= edge(bi + 1)) bi++; f = bits[bi] ? F1 : F0; }
+    else f = bits[bits.length - 1] ? F1 : F0;
+    phase += 2 * Math.PI * f / sr;
+    if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+    let a = AMP;
+    if (n < ramp) a *= n / ramp;                                // 鳴らし始めはそっと
+    if (n >= nEnd) a *= 1 - (n - nEnd) / nTail;                 // 終わりもそっと
+    out[n] = a * Math.sin(phase);
+  }
+  return out;
+}
+
+// ---- 決まった高さの強さを測る（ゲルツェル法）-------------------
+// FFT は全部の高さを一度に調べるが、ここでは「1800Hz」「2400Hz」など
+// 決まった高さだけ分かればよいので、その高さだけを軽く計算する方法を使う。
+function goertzel(x, start, len, f, sr) {
+  const c = 2 * Math.cos(2 * Math.PI * f / sr);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < len; i++) {
+    const s0 = x[start + i] + c * s1 - s2;
+    s2 = s1; s1 = s0;
+  }
+  return s1 * s1 + s2 * s2 - c * s1 * s2;
+}
+function energy(x, start, len) {
+  let e = 0;
+  for (let i = 0; i < len; i++) e += x[start + i] * x[start + i];
+  return e;
+}
+
+// ---- 受け取る仕組み ------------------------------------------
+// 1. 0.01秒ずつ区切って「合図の音」を探す
+// 2. 合図が途切れた瞬間を「本文の始まり」とする
+// 3. 少し前後にずらしながら同期の目印 10100101 が読める位置を探す（タイミング合わせ）
+// 4. 長さを読み、その分の音がそろったら一気に読み、検査の数を確かめる
+class Receiver {
+  constructor(sr, on) {
+    this.sr = sr; this.on = on;
+    this.buf = new Float32Array(sr * 4);
+    this.len = 0;        // buf に入っている数
+    this.base = 0;       // buf[0] が、受け取り開始から何番目の音か
+    this.win = Math.round(0.01 * sr);
+    this.scan = 0;
+    this.reset();
+  }
+  reset() {
+    this.state = 'idle'; this.cand = null; this.count = 0;
+    this.sp = null; this.edge = 0; this.hdr = null; this.startWins = 0;
+  }
+  get end() { return this.base + this.len; }
+  at(abs) { return abs - this.base; }
+  append(chunk) {
+    if (this.len + chunk.length > this.buf.length) {
+      const nb = new Float32Array(Math.max(this.buf.length * 2, this.len + chunk.length));
+      nb.set(this.buf.subarray(0, this.len));
+      this.buf = nb;
+    }
+    this.buf.set(chunk, this.len);
+    this.len += chunk.length;
+  }
+  trim(keepFrom) {
+    const k = keepFrom - this.base;
+    if (k <= 0) return;
+    this.buf.copyWithin(0, k, this.len);
+    this.len -= k; this.base += k;
+  }
+  push(chunk) {
+    this.append(chunk);
+    while (this.state !== 'data' && this.scan + this.win <= this.end) {
+      this.step(this.scan);
+      this.scan += this.win;
+    }
+    if (this.state === 'data') this.tryDecode();
+    if (this.state === 'idle') this.trim(this.scan - Math.round(0.5 * this.sr));
+  }
+  // 0.01秒ぶんの音を調べる
+  step(abs) {
+    const i = this.at(abs), n = this.win, sr = this.sr, x = this.buf;
+    const e = energy(x, i, n);
+    const rms = Math.sqrt(e / n);
+    // 純度：その高さの音が、全体の音のうちどれだけを占めるか（0〜1）
+    const purity = (f) => e > 1e-12 ? goertzel(x, i, n, f, sr) / (n / 2 * e) : 0;
+    let best = null, bp = 0;
+    for (const s of SPEEDS) { const p = purity(s.fs); if (p > bp) { bp = p; best = s; } }
+    this.on('level', { sig: bp, z: purity(F0), o: purity(F1), rms });
+
+    if (this.state === 'idle') {
+      if (rms > MIN_RMS && bp > 0.35) {
+        if (this.cand === best) this.count++; else { this.cand = best; this.count = 1; }
+        if (this.count >= 15) {                 // 0.15秒続いたら合図とみなす
+          this.state = 'start'; this.sp = best; this.startWins = 0;
+          this.on('start', { speed: best });
+        }
+      } else { this.cand = null; this.count = 0; }
+    } else if (this.state === 'start') {
+      this.startWins++;
+      const p = purity(this.sp.fs);
+      if (p < 0.15 || rms < MIN_RMS) {           // 合図が途切れた ＝ 本文の始まり
+        this.state = 'data'; this.edge = abs;
+        this.on('sync', {});
+      } else if (this.startWins > 150) {
+        this.on('error', { msg: '合図の音が長く続きすぎています。' });
+        this.reset();
+      }
+    }
+  }
+  // 1ビットずつ「0の音」と「1の音」のどちらが強いかを比べる
+  readBits(off, count) {
+    const sr = this.sr, T = this.sp.T, nb = Math.round(T * sr);
+    const a0 = Math.round(0.2 * nb), al = Math.round(0.65 * nb);  // ビットの真ん中だけを使う（反響を避ける）
+    const bits = []; let q = 0;
+    for (let i = 0; i < count; i++) {
+      const s = this.at(this.edge + off + Math.round(i * T * sr)) + a0;
+      const p0 = goertzel(this.buf, s, al, F0, sr);
+      const p1 = goertzel(this.buf, s, al, F1, sr);
+      bits.push(p1 > p0 ? 1 : 0);
+      q += Math.abs(p1 - p0) / (p1 + p0 + 1e-12);   // 差がはっきりしているほど 1 に近い
+    }
+    return { bits, q: q / count };
+  }
+  tryDecode() {
+    const sr = this.sr, T = this.sp.T, nb = Math.round(T * sr);
+    const posEnd = (off, i) => this.edge + off + Math.round(i * T * sr);
+    const lo = -Math.round(1.5 * nb), hi = Math.round(1.0 * nb);
+
+    if (!this.hdr) {
+      if (this.end < posEnd(hi, 16) + 1) return;
+      let best = null;
+      const step = Math.max(1, Math.round(nb / 12));
+      for (let off = lo; off <= hi; off += step) {
+        if (this.at(this.edge + off) < 0) continue;
+        const r = this.readBits(off, 16);
+        const sync = bitsToByte(r.bits, 0), len = bitsToByte(r.bits, 8);
+        if (sync !== SYNC || len < 1 || len > MAX_LEN) continue;
+        if (!best || r.q > best.q) best = { off, len, q: r.q };
+      }
+      if (!best) {
+        this.on('error', { msg: '合図のあとの音が読めませんでした。' });
+        this.reset(); this.scan = this.end;
+        return;
+      }
+      this.hdr = best;
+    }
+    const total = 8 * (this.hdr.len + 3);
+    const need = posEnd(this.hdr.off, total) + 1;
+    if (this.end < need) {
+      this.on('progress', { frac: (this.end - this.edge) / (need - this.edge), len: this.hdr.len });
+      return;
+    }
+    const r = this.readBits(this.hdr.off, total);
+    const bytes = [];
+    for (let i = 0; i < total; i += 8) bytes.push(bitsToByte(r.bits, i));
+    const len = bytes[1];
+    const payload = bytes.slice(2, 2 + len);
+    const ok = crc8(bytes.slice(1, 2 + len)) === bytes[2 + len];
+    this.on('done', { payload, ok, speed: this.sp, quality: r.q });
+    this.reset(); this.scan = this.end;
+  }
+}
+
+// 文字 ↔ バイト（UTF-8）
+const enc = new TextEncoder();
+const dec = new TextDecoder('utf-8', { fatal: false });
+function textToBytes(t) { return Array.from(enc.encode(t)); }
+function bytesToText(b) { return dec.decode(new Uint8Array(b)); }
+// ===CORE END===
+
+/* ============================================================
+   画面の部分
+   ============================================================ */
+const $ = (id) => document.getElementById(id);
+let ctx = null;
+function ensureCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return ctx;
+}
+
+// ---- タブ ---------------------------------------------------
+function showTab(which) {
+  const send = which === 'send';
+  $('tabSend').setAttribute('aria-selected', String(send));
+  $('tabRecv').setAttribute('aria-selected', String(!send));
+  $('pSend').hidden = !send;
+  $('pRecv').hidden = send;
+}
+$('tabSend').addEventListener('click', () => showTab('send'));
+$('tabRecv').addEventListener('click', () => showTab('recv'));
+if (location.hash === '#ukeru') showTab('recv');
+
+// ---- 速さの選択 ---------------------------------------------
+let speed = SPEEDS[1];
+for (const s of SPEEDS) {
+  const b = document.createElement('button');
+  b.textContent = s.name;
+  b.setAttribute('aria-pressed', String(s === speed));
+  b.addEventListener('click', () => {
+    speed = s;
+    $('speedSeg').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    refresh();
+  });
+  $('speedSeg').appendChild(b);
+}
+
+// ---- フレームの図を作る -------------------------------------
+function buildFrameView(text) {
+  const box = $('frame');
+  box.textContent = '';
+  const payload = textToBytes(text);
+  const frame = frameBytes(payload);
+  // 文字ごとのラベル（日本語は3バイトなので、2つ目以降は〃）
+  const labels = ['同期', '長さ'];
+  for (const ch of text) {
+    const n = enc.encode(ch).length;
+    labels.push(ch === ' ' ? '空白' : ch);
+    for (let k = 1; k < n; k++) labels.push('〃');
+  }
+  labels.push('検査');
+
+  const sig = document.createElement('div');
+  sig.className = 'byte sig';
+  sig.innerHTML = '<span class="bl">合図</span><span class="bb">' + speed.fs + 'Hz</span>';
+  box.appendChild(sig);
+
+  const chips = [sig];
+  frame.forEach((b, i) => {
+    const d = document.createElement('div');
+    const isChar = i >= 2 && i < frame.length - 1 && labels[i] !== '〃';
+    d.className = 'byte' + (isChar ? ' ch' : '');
+    const bl = document.createElement('span'); bl.className = 'bl'; bl.textContent = labels[i];
+    const bb = document.createElement('span'); bb.className = 'bb';
+    for (let k = 7; k >= 0; k--) {
+      const bit = (b >> k) & 1;
+      const s = document.createElement('span'); s.className = 'b' + bit; s.textContent = bit;
+      bb.appendChild(s);
+    }
+    d.append(bl, bb);
+    box.appendChild(d);
+    chips.push(d);
+  });
+  return chips;
+}
+
+let chips = [];
+function refresh() {
+  const text = $('txt').value;
+  const n = textToBytes(text).length;
+  const sec = START_SEC + 8 * (n + 3) * speed.T;
+  const c = $('count');
+  c.textContent = n + 'バイト・約' + sec.toFixed(1) + '秒';
+  c.classList.toggle('over', n > MAX_LEN);
+  $('btnSend').disabled = n === 0 || n > MAX_LEN || playing;
+  $('btnLoop').disabled = n === 0 || n > MAX_LEN;
+  if (n > MAX_LEN) $('sendMsg').textContent = '送れるのは' + MAX_LEN + 'バイトまでです。文字を減らしてください。';
+  else $('sendMsg').textContent = '';
+  chips = n <= MAX_LEN ? buildFrameView(text) : [];
+}
+$('txt').addEventListener('input', refresh);
+document.querySelectorAll('.ex').forEach(b => b.addEventListener('click', () => { $('txt').value = b.textContent; refresh(); }));
+
+// ---- 音で送る -----------------------------------------------
+let playing = null;
+async function send() {
+  const text = $('txt').value;
+  const bits = bytesToBits(frameBytes(textToBytes(text)));
+  ensureCtx(); await ctx.resume();
+  const wave = synthesize(bits, ctx.sampleRate, speed);
+  const buf = ctx.createBuffer(1, wave.length, ctx.sampleRate);
+  buf.copyToChannel(wave, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.05;
+  src.start(t0);
+  const sp = speed;
+  playing = { src, t0, sp, bitsLen: bits.length };
+  $('btnSend').disabled = true; $('btnStopSend').disabled = false;
+  src.onended = endSend;
+  requestAnimationFrame(tickSend);
+}
+function tickSend() {
+  if (!playing) return;
+  const t = ctx.currentTime - playing.t0;
+  let idx;                                  // 0 = 合図、1〜 = バイト
+  if (t < START_SEC) idx = 0;
+  else idx = 1 + Math.floor((t - START_SEC) / playing.sp.T / 8);
+  chips.forEach((c, i) => { c.classList.toggle('now', i === idx); c.classList.toggle('done', i < idx); });
+  requestAnimationFrame(tickSend);
+}
+function endSend() {
+  if (playing) { try { playing.src.stop(); } catch (_) {} }
+  playing = null;
+  chips.forEach(c => c.classList.remove('now', 'done'));
+  $('btnStopSend').disabled = true;
+  refresh();
+}
+$('btnSend').addEventListener('click', send);
+$('btnStopSend').addEventListener('click', endSend);
+
+// ---- この端末だけで確かめる -----------------------------------
+// 合成した音に、雑音・反響・ずれを混ぜてから、受け取る仕組みに通す。
+function loopTest() {
+  const text = $('txt').value;
+  const sr = 48000;
+  const wave = synthesize(bytesToBits(frameBytes(textToBytes(text))), sr, speed);
+  const pre = Math.round((0.2 + Math.random() * 0.3) * sr);   // 始まる前の無音（ばらばら）
+  const x = new Float32Array(pre + wave.length + Math.round(0.3 * sr));
+  x.set(wave, pre);
+  const d1 = Math.round(0.006 * sr), d2 = Math.round(0.017 * sr);
+  const y = new Float32Array(x.length);
+  for (let n = 0; n < x.length; n++) {
+    y[n] = 0.4 * x[n]
+         + (n >= d1 ? 0.25 * x[n - d1] : 0)                    // 反響（壁からのはね返り）
+         + (n >= d2 ? 0.12 * x[n - d2] : 0)
+         + 0.04 * (Math.random() * 2 - 1);                     // 雑音
+  }
+  let got = null, err = null;
+  const r = new Receiver(sr, (type, d) => {
+    if (type === 'done') got = d;
+    if (type === 'error') err = d.msg;
+  });
+  for (let i = 0; i < y.length; i += 2048) r.push(y.subarray(i, i + 2048));
+  const box = $('loopResult');
+  box.textContent = '';
+  const a = document.createElement('div');
+  const b = document.createElement('div'); b.className = 'meta';
+  if (got) {
+    a.innerHTML = '受け取った文字：<b></b>';
+    a.querySelector('b').textContent = bytesToText(got.payload);
+    b.innerHTML = got.ok
+      ? '<span class="ok">検査OK</span>　雑音と反響を混ぜても読めました。信号のはっきり度 ' + Math.round(got.quality * 100) + '%'
+      : '<span class="ng">検査が合いません</span>　途中で壊れた可能性があります。';
+  } else {
+    a.textContent = '読み取れませんでした。' + (err || '');
+  }
+  box.append(a, b);
+}
+$('btnLoop').addEventListener('click', loopTest);
+
+// ---- 受け取る -----------------------------------------------
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  constructor(){ super(); this.b = new Float32Array(2048); this.n = 0; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      this.b[this.n++] = ch[i];
+      if (this.n === 2048) { this.port.postMessage(this.b.slice(0)); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('oto-tap', Tap);`;
+let workletReady = false;
+let listening = null;
+let lastLevel = null;
+const history = [];
+
+function setStatus(s, text) { const el = $('status'); el.dataset.s = s; el.textContent = text; }
+
+// マイクの音を途切れなく受け取る（AudioWorklet、使えなければ ScriptProcessor）
+async function openTap(stream, onChunk) {
+  const src = ctx.createMediaStreamSource(stream);
+  const sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
+  try {
+    if (!ctx.audioWorklet) throw new Error('no worklet');
+    if (!workletReady) {
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      workletReady = true;
+    }
+    const node = new AudioWorkletNode(ctx, 'oto-tap');
+    node.port.onmessage = (e) => onChunk(e.data);
+    src.connect(node); node.connect(sink);
+    return () => { src.disconnect(); node.disconnect(); sink.disconnect(); };
+  } catch (_) {
+    const sp = ctx.createScriptProcessor(2048, 1, 1);
+    sp.onaudioprocess = (e) => onChunk(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(sp); sp.connect(sink);
+    return () => { src.disconnect(); sp.disconnect(); sink.disconnect(); };
+  }
+}
+
+async function startListen() {
+  $('recvMsg').textContent = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $('recvMsg').textContent = 'このページではマイクが使えません。https のページで開いてください。';
+    return;
+  }
+  ensureCtx(); await ctx.resume();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+  } catch (e) {
+    $('recvMsg').textContent = e.name === 'NotAllowedError'
+      ? 'マイクの使用が許可されませんでした。アドレス欄のマイク表示から許可してください。'
+      : 'マイクを開けませんでした（' + e.name + '）。';
+    return;
+  }
+  const rx = new Receiver(ctx.sampleRate, onRx);
+  const close = await openTap(stream, (c) => rx.push(c));
+  listening = { stream, close };
+  $('btnListen').textContent = '受け取りを止める';
+  setStatus('listen', '合図を待っています');
+  requestAnimationFrame(drawMeters);
+}
+function stopListen() {
+  if (!listening) return;
+  listening.close();
+  listening.stream.getTracks().forEach(t => t.stop());
+  listening = null;
+  $('btnListen').textContent = '受け取りを開始';
+  setStatus('off', '止まっています');
+  ['mS', 'm0', 'm1'].forEach(id => $(id).style.width = '0%');
+  $('prog').style.width = '0%';
+}
+$('btnListen').addEventListener('click', () => listening ? stopListen() : startListen());
+
+function onRx(type, d) {
+  if (type === 'level') { lastLevel = d; return; }
+  if (type === 'start') { setStatus('sig', '合図を受信（' + d.speed.name + '）'); $('recvMsg').textContent = ''; }
+  if (type === 'sync') { setStatus('recv', '受信中'); }
+  if (type === 'progress') { $('prog').style.width = Math.min(100, d.frac * 100).toFixed(0) + '%'; }
+  if (type === 'error') { setStatus('ng', '読み取れませんでした'); $('recvMsg').textContent = d.msg + ' 端末を近づけるか、「ゆっくり」で送り直してください。'; $('prog').style.width = '0%'; later(); }
+  if (type === 'done') {
+    const text = bytesToText(d.payload);
+    $('prog').style.width = '100%';
+    const big = $('big');
+    big.classList.remove('wait');
+    big.textContent = text;
+    $('meta').innerHTML = (d.ok ? '<span class="ok">検査OK</span>' : '<span class="ng">検査が合いません（一部が壊れているかもしれません）</span>')
+      + '　速さ：' + d.speed.name + '　はっきり度：' + Math.round(d.quality * 100) + '%';
+    setStatus(d.ok ? 'ok' : 'ng', d.ok ? '受け取りました' : '壊れている可能性');
+    addHistory(text, d.ok);
+    if (d.ok && $('optFlash').checked) flash();
+    if (d.ok && navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch (_) {} }
+    later();
+  }
+}
+let laterTimer = 0;
+function later() {
+  clearTimeout(laterTimer);
+  laterTimer = setTimeout(() => { if (listening) { setStatus('listen', '合図を待っています'); $('prog').style.width = '0%'; } }, 2500);
+}
+function flash() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { document.body.classList.add('flash'); setTimeout(() => document.body.classList.remove('flash'), 800); return; }
+  let k = 0;
+  const t = setInterval(() => { document.body.classList.toggle('flash'); if (++k >= 6) { clearInterval(t); document.body.classList.remove('flash'); } }, 180);
+}
+function addHistory(text, ok) {
+  history.unshift({ t: new Date(), text, ok });
+  history.length = Math.min(history.length, 20);
+  const ul = $('hist'); ul.textContent = '';
+  for (const h of history) {
+    const li = document.createElement('li');
+    const tm = document.createElement('time');
+    tm.textContent = h.t.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const sp = document.createElement('span');
+    sp.textContent = h.text + (h.ok ? '' : '（検査NG）');
+    if (!h.ok) sp.className = 'ng';
+    li.append(tm, sp); ul.appendChild(li);
+  }
+}
+function drawMeters() {
+  if (!listening) return;
+  if (lastLevel) {
+    const w = (v) => Math.min(100, Math.max(0, v * 100)).toFixed(0) + '%';
+    $('mS').style.width = w(lastLevel.sig);
+    $('m0').style.width = w(lastLevel.z);
+    $('m1').style.width = w(lastLevel.o);
+  }
+  requestAnimationFrame(drawMeters);
+}
+
+// ---- はじめの表示 -------------------------------------------
+refresh();
+if (!window.isSecureContext) $('recvMsg').textContent = 'https ではないため、マイクが使えない可能性があります。';
+</script>
+</body>
+</html>
