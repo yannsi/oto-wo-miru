@@ -186,6 +186,9 @@ ol.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4p
 .scan{position:absolute; left:0; right:0; height:2px; background:var(--tone); box-shadow:0 0 6px var(--tone); pointer-events:none; display:none}
 .hidden{display:none!important}
 input[type=file]{display:none}
+.overlay{position:fixed; inset:0; background:rgba(0,0,0,.75); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:16px; z-index:10}
+.overlay img{width:min(90vw,420px); height:auto; image-rendering:pixelated; border-radius:8px; background:#fff; -webkit-touch-callout:default}
+.overlay p{color:#fff; margin:0; text-align:center; font-size:1rem; line-height:1.6}
 .big-num{font-family:var(--font-num); font-size:.9rem; color:var(--muted)}
 </style>
 </head>
@@ -266,6 +269,7 @@ input[type=file]{display:none}
         <span class="label">この端末の中で受け取った絵（雑音と反響を混ぜています）</span>
         <canvas id="loopPic" class="rx-pic" width="96" height="96"></canvas>
         <p class="note" id="loopMsg"></p>
+        <div class="row"><button id="btnSaveLoop" class="sub" disabled>この絵を保存する</button></div>
       </div>
     </div>
   </section>
@@ -283,6 +287,7 @@ input[type=file]{display:none}
       <div class="meta" id="meta">合図が聞こえると、ここに上から1行ずつ絵が出てきます</div>
       <div class="row">
         <button id="btnSave" class="sub" disabled>絵を保存する</button>
+        <span class="note">絵を受け取ると押せるようになります</span>
       </div>
     </div>
   </section>
@@ -305,6 +310,11 @@ input[type=file]{display:none}
 
 </div>
 
+<div class="overlay" id="saveOverlay" hidden>
+  <img id="saveImg" alt="受け取った絵">
+  <p>絵を長押しして<br>「"写真"に保存」を選んでください</p>
+  <button id="btnCloseOverlay">閉じる</button>
+</div>
 <script>
 // ===CORE START===
 /* ============================================================
@@ -784,7 +794,8 @@ function loopTest() {
   const view = makeView($('loopPic'), null, (k, d) => {
     if (k === 'start') $('loopMsg').textContent = '合図を受け取りました（' + d.band.name + '・' + d.mode.name + '）';
     if (k === 'line') $('loopMsg').textContent = '受け取り中… ' + (d.row + 1) + ' / ' + d.mode.size + '行';
-    if (k === 'done') { $('loopMsg').textContent = '受け取りました（' + d.band.name + '・' + d.mode.name + '）。「送られる絵」と見比べてみてください。'; stopLoop(); }
+    if (k === 'begin') $('btnSaveLoop').disabled = true;
+    if (k === 'done') { prepSave('loop', $('loopPic')); $('loopMsg').textContent = '受け取りました（' + d.band.name + '・' + d.mode.name + '）。「送られる絵」と見比べてみてください。'; stopLoop(); }
   });
   const rs = PBANDS.map(b => new PicReceiver(sr, view.on, b));
   let i = 0;
@@ -878,7 +889,7 @@ const rxView = makeView($('rxPic'), $('scanRecv'), (type, d) => {
     busy = null;
     setStatus('ok', '受け取りました');
     $('meta').textContent = d.mode.size + '×' + d.mode.size + '　' + d.band.name + '・' + d.mode.name + '　を受け取りました';
-    $('btnSave').disabled = false;
+    prepSave('rx', $('rxPic'));
     setTimeout(() => { if (listening && !busy) setStatus('listen', '合図を待っています'); }, 2500);
   }
 });
@@ -923,17 +934,50 @@ function stopListen() {
 }
 $('btnListen').addEventListener('click', () => listening ? stopListen() : startListen());
 
-// 受け取った絵を保存（大きくしてから、点がぼやけないように）
-$('btnSave').addEventListener('click', () => {
-  const s = $('rxPic'), k = Math.max(1, Math.floor(512 / s.width));
-  const t = document.createElement('canvas'); t.width = s.width * k; t.height = s.height * k;
-  const c = t.getContext('2d'); c.imageSmoothingEnabled = false; c.drawImage(s, 0, 0, t.width, t.height);
+// ---- 受け取った絵を保存 ----------------------------------------
+// iPhone は Web ページからの「ダウンロード」がうまく動かないことが多い（ホーム画面から開いたときは特に）。
+// そこでスマホでは共有メニューを出し、「画像を保存」で写真アプリに入れられるようにする。
+// 共有メニューは、ボタンを押した直後でないと出せないので、絵を受け取った時点で先に画像を作っておく。
+// 共有メニューが使えないときは、絵を大きく出して「長押しで保存」してもらう。PCではふつうにダウンロードする。
+const saved = {};
+function stamp() {
+  const d = new Date(), z = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
+}
+function prepSave(key, canvas) {
+  const k = Math.max(1, Math.floor(512 / canvas.width));
+  const t = document.createElement('canvas'); t.width = canvas.width * k; t.height = canvas.height * k;
+  const c = t.getContext('2d'); c.imageSmoothingEnabled = false; c.drawImage(canvas, 0, 0, t.width, t.height);
+  t.toBlob((blob) => {
+    if (!blob) return;
+    const name = 'oto-e-' + stamp() + '.png';
+    let file = null;
+    try { file = new File([blob], name, { type: 'image/png' }); } catch (_) {}
+    if (saved[key] && saved[key].url) URL.revokeObjectURL(saved[key].url);
+    saved[key] = { blob, file, name, url: URL.createObjectURL(blob) };
+    $(key === 'rx' ? 'btnSave' : 'btnSaveLoop').disabled = false;
+  }, 'image/png');
+}
+function savePic(key) {
+  const it = saved[key];
+  if (!it) return;
+  const phone = matchMedia('(pointer: coarse)').matches;
+  if (phone && it.file && navigator.canShare && navigator.canShare({ files: [it.file] })) {
+    navigator.share({ files: [it.file], title: '音で届いた絵' }).catch((e) => { if (e && e.name !== 'AbortError') showOverlay(it); });
+    return;
+  }
+  if (phone) { showOverlay(it); return; }
   const a = document.createElement('a');
-  const d = new Date();
-  a.download = 'oto-e-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + String(d.getSeconds()).padStart(2, '0') + '.png';
-  a.href = t.toDataURL('image/png');
-  a.click();
-});
+  a.download = it.name; a.href = it.url;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function showOverlay(it) {
+  $('saveImg').src = it.url;
+  $('saveOverlay').hidden = false;
+}
+$('btnCloseOverlay').addEventListener('click', () => { $('saveOverlay').hidden = true; });
+$('btnSave').addEventListener('click', () => savePic('rx'));
+$('btnSaveLoop').addEventListener('click', () => savePic('loop'));
 
 // ---- はじめの表示 -------------------------------------------
 refresh();
