@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0d7366">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="音で送る">
+<title>音で絵を送る</title>
+<!--
+  音で絵を送る（音でデータを送る・第3段階）
+  ------------------------------------------------------------
+  絵 → 明るさの並び → 音の高さ → 空気 → マイク → 音の高さ → 明るさ → 絵
+  FAX や、国際宇宙ステーションが送ってくる写真（SSTV）と同じ考え方です。
+
+  第2段階との違い
+    第2段階は「0か1か」を送る（デジタル）。1つでも読みまちがえると文字が壊れる。
+    第3段階は「明るさそのもの」を音の高さで送る（アナログ）。
+    雑音が入っても絵が壊れるのではなく、ざらつくだけ。だから受け取りながら1行ずつ描ける。
+
+  音の高さ          黒       白       行の合図   最初の合図（はやい／ふつう／きれい）
+    聞こえる音     1500Hz   2300Hz   1200Hz    2700 / 2900 / 3100Hz
+    聞こえない音  18100Hz  18900Hz  17800Hz   17000 / 17200 / 17400Hz
+
+  形
+    [最初の合図 0.4秒] [行の合図 0.01秒][黒 0.005秒][点 × 横の数] [行の合図]…（縦の数だけくり返す）
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@400;700&family=BIZ+UDPGothic:wght@400;700&display=swap">
+<style>
+/* レイアウト: 上で「送る／受け取る」を切り替え、下に各パネル。第1段階と同じ色と書体 */
+:root{
+  --bg:#eef2f1; --surface:#ffffff; --fg:#1b2321; --muted:#5a6764; --line:#d3dbd9;
+  --accent:#0d7366; --accent-fg:#ffffff; --tone:#b0521c;
+  --bit0:#2f6fb0;      /* 0の音（低い）*/
+  --bit1:#b0521c;      /* 1の音（高い）*/
+  --sig:#7a5bb5;       /* 合図の音 */
+  --ok:#1f7a3d; --ng:#b3261e;
+  --chip:#f3f6f5;
+  --flash:#ffe08a;
+  --font-ui:"BIZ UDPGothic","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  --font-num:"BIZ UDGothic",ui-monospace,"Menlo","Consolas",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+    --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+    --bit0:#6fa8e0; --bit1:#e88a55; --sig:#b39ae6; --ok:#5cc47e; --ng:#f07a72;
+    --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+  --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+  --bit0:#6fa8e0; --bit1:#e88a55; --sig:#b39ae6; --ok:#5cc47e; --ng:#f07a72;
+  --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:var(--font-ui); font-size:15px; line-height:1.7;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  padding-block:max(16px, env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-bottom, 0px));
+  transition:background-color .15s;
+}
+body.flash{background:var(--flash)}
+.wrap{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+header{display:flex; flex-direction:column; gap:2px}
+.crumb{font-size:.85rem}
+.crumb a{color:var(--accent)}
+h1{font-size:1.5rem; margin:0; letter-spacing:.04em; text-wrap:balance}
+.lead{margin:0; color:var(--muted); font-size:.92rem}
+h2{font-size:1rem; margin:0; letter-spacing:.04em}
+
+.tabs{display:grid; grid-template-columns:1fr 1fr; gap:0; border:1px solid var(--accent); border-radius:10px; overflow:hidden}
+.tabs button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:48px; font-size:1rem}
+.tabs button[aria-selected="true"]{background:var(--accent); color:var(--accent-fg)}
+
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0}
+.row{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+.label{font-size:.75rem; color:var(--muted); letter-spacing:.06em}
+.note{font-size:.85rem; color:var(--muted); margin:0}
+
+button{
+  font:inherit; font-weight:700; cursor:pointer;
+  border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg);
+  border-radius:8px; padding:9px 14px; min-height:44px;
+}
+button.sub{background:transparent; color:var(--accent)}
+button.chipbtn{min-height:36px; padding:4px 10px; font-weight:400; font-size:.9rem}
+.grow{flex:1}
+.phr{display:flex; flex-direction:column; gap:8px; padding:10px; border:1px dashed var(--line); border-radius:8px}
+#phrases:empty::before{content:"まだありません。文字を入れて「＋ いまの文字を保存」を押すと、ここに並びます。"; font-size:.85rem; color:var(--muted)}
+#phrases.editing button.chipbtn{border-color:var(--ng); color:var(--ng)}
+#phrases.editing button.chipbtn::before{content:"× "}
+button[aria-pressed="true"].chipbtn{background:var(--accent); color:var(--accent-fg)}
+.linkbtn{border:0; background:none; color:var(--accent); text-decoration:underline; min-height:0; padding:0 4px; font-weight:700; font-size:inherit}
+button:disabled{opacity:.45; cursor:default}
+button:focus-visible, textarea:focus-visible, input:focus-visible{outline:3px solid var(--tone); outline-offset:2px}
+
+.seg{display:inline-grid; grid-auto-flow:column; border:1px solid var(--accent); border-radius:8px; overflow:hidden}
+.seg button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:40px; padding:6px 12px; font-weight:400}
+.seg button[aria-pressed="true"]{background:var(--accent); color:var(--accent-fg); font-weight:700}
+
+textarea{
+  width:100%; font:inherit; font-size:1.25rem; line-height:1.5; padding:10px 12px;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); resize:vertical; min-height:3.2em;
+}
+.count{font-family:var(--font-num); font-variant-numeric:tabular-nums; font-size:.9rem}
+.count.over{color:var(--ng); font-weight:700}
+
+/* フレームの図（バイトごとのチップ） */
+.frame{display:flex; flex-wrap:wrap; gap:6px}
+.byte{display:flex; flex-direction:column; align-items:center; gap:0; padding:4px 6px; border-radius:6px; background:var(--chip); border:1px solid var(--line); min-width:0}
+.byte .bl{font-size:.7rem; color:var(--muted); letter-spacing:.04em}
+.byte .bb{font-family:var(--font-num); font-size:.82rem; letter-spacing:.06em; white-space:nowrap}
+.byte .bb .b0{color:var(--bit0)}
+.byte .bb .b1{color:var(--bit1)}
+.byte.sig{border-color:var(--sig)}
+.byte.sig .bb{color:var(--sig)}
+.byte.ch .bl{color:var(--fg); font-size:.85rem; font-weight:700}
+.byte.now{outline:2px solid var(--tone); outline-offset:1px}
+.byte.done{opacity:.55}
+.legend{display:flex; flex-wrap:wrap; gap:14px; font-size:.8rem; color:var(--muted)}
+.legend span::before{content:""; display:inline-block; width:.8em; height:.8em; border-radius:2px; margin-right:4px; vertical-align:-1px; background:currentColor}
+.legend .l0{color:var(--bit0)} .legend .l1{color:var(--bit1)} .legend .ls{color:var(--sig)}
+.legend b{color:var(--muted); font-weight:400}
+
+.result{border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--bg); display:flex; flex-direction:column; gap:2px}
+.result:empty{display:none}
+
+/* 受け取る側 */
+.status{display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:999px; border:1px solid var(--line); font-weight:700; font-size:.9rem}
+.status::before{content:""; width:.6em; height:.6em; border-radius:50%; background:var(--muted)}
+.status[data-s="listen"]::before{background:var(--accent)}
+.status[data-s="sig"]::before, .status[data-s="recv"]::before{background:var(--tone)}
+.status[data-s="ok"]::before{background:var(--ok)}
+.status[data-s="ng"]::before{background:var(--ng)}
+
+.meters{display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center}
+.meter{height:12px; background:var(--chip); border-radius:6px; overflow:hidden; border:1px solid var(--line)}
+.meter i{display:block; height:100%; width:0%; transition:width .06s linear}
+.m-s i{background:var(--sig)} .m-0 i{background:var(--bit0)} .m-1 i{background:var(--bit1)}
+.progress{height:6px; background:var(--chip); border-radius:3px; overflow:hidden}
+.progress i{display:block; height:100%; width:0%; background:var(--tone)}
+
+.big{font-size:clamp(1.8rem, 7vw, 3rem); font-weight:700; line-height:1.3; word-break:break-all; min-height:1.3em; text-wrap:balance}
+.big.wait{color:var(--muted); font-size:1.1rem; font-weight:400}
+.meta{font-size:.85rem; color:var(--muted)}
+.meta .ok{color:var(--ok); font-weight:700}
+.meta .ng{color:var(--ng); font-weight:700}
+
+ul.hist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px}
+ul.hist li{display:flex; gap:10px; align-items:baseline; border-bottom:1px solid var(--line); padding:4px 0; min-width:0}
+ul.hist time{font-family:var(--font-num); font-size:.8rem; color:var(--muted); flex:none; font-variant-numeric:tabular-nums}
+ul.hist span{word-break:break-all; min-width:0}
+ul.hist .ng{color:var(--ng)}
+
+.check{display:flex; align-items:center; gap:8px; font-size:.9rem}
+.check input{width:20px; height:20px; accent-color:var(--accent)}
+.msg{margin:0; font-size:.9rem; color:var(--ng)}
+.msg:empty{display:none}
+
+ol.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4px; font-size:.92rem}
+
+@media (prefers-reduced-motion: reduce){ body, .meter i{transition:none} }
+</style>
+<style>
+/* 第3段階で足したもの */
+.grow{flex:1}
+.pic-wrap{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+@media (max-width:520px){ .pic-wrap{grid-template-columns:1fr} }
+.pic-box{display:flex; flex-direction:column; gap:6px; min-width:0}
+.pic{width:100%; aspect-ratio:1; display:block; border-radius:8px; border:1px solid var(--line); background:#fff; touch-action:none}
+.pic.dot{image-rendering:pixelated; image-rendering:crisp-edges; background:#222}
+.rx-pic{width:100%; max-width:420px; aspect-ratio:1; margin:0 auto; display:block; border-radius:10px; image-rendering:pixelated; image-rendering:crisp-edges; background:#1b2321; border:1px solid var(--line)}
+.stage{position:relative}
+.scan{position:absolute; left:0; right:0; height:2px; background:var(--tone); box-shadow:0 0 6px var(--tone); pointer-events:none; display:none}
+.hidden{display:none!important}
+input[type=file]{display:none}
+.big-num{font-family:var(--font-num); font-size:.9rem; color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="crumb"><a href="./">← 第1段階　音を見る</a>　<a href="okuru.html">第2段階　音で文字を送る</a></div>
+    <h1>音で絵を送る</h1>
+    <p class="lead">音でデータを送る・第3段階　絵の明るさを音の高さに変えて送ります。受け取る側では、1行ずつ絵が浮かび上がります</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="使い方の切り替え">
+    <button role="tab" id="tabSend" aria-selected="true" aria-controls="pSend">送る</button>
+    <button role="tab" id="tabRecv" aria-selected="false" aria-controls="pRecv">受け取る</button>
+  </div>
+
+  <!-- ===================== 送る ===================== -->
+  <section id="pSend" role="tabpanel" aria-labelledby="tabSend" class="wrap" style="gap:16px">
+    <div class="panel">
+      <div class="row">
+        <span class="label">絵</span>
+        <div class="seg" role="group" aria-label="絵の選び方" id="srcSeg">
+          <button data-src="draw" aria-pressed="true">手で描く</button>
+          <button data-src="photo" aria-pressed="false">写真</button>
+          <button data-src="sample" aria-pressed="false">見本</button>
+        </div>
+      </div>
+
+      <div class="row" id="drawTools">
+        <span class="label">ペン</span>
+        <div class="seg" role="group" aria-label="ペン" id="penSeg">
+          <button data-pen="thin" aria-pressed="false">細い</button>
+          <button data-pen="thick" aria-pressed="true">太い</button>
+          <button data-pen="erase" aria-pressed="false">消しゴム</button>
+        </div>
+        <button id="btnClear" class="sub chipbtn">全部消す</button>
+      </div>
+      <div class="row hidden" id="photoTools">
+        <button id="btnPhoto" class="sub">写真を選ぶ・撮る</button>
+        <input type="file" id="filePhoto" accept="image/*">
+        <span class="note">写真の上にも描けます</span>
+      </div>
+      <div class="row hidden" id="sampleTools">
+        <button class="sub chipbtn smp" data-s="sea">海と太陽</button>
+        <button class="sub chipbtn smp" data-s="face">にっこり</button>
+        <button class="sub chipbtn smp" data-s="text">文字</button>
+        <button class="sub chipbtn smp" data-s="chart">しま模様</button>
+      </div>
+
+      <div class="pic-wrap">
+        <div class="pic-box">
+          <span class="label">元の絵（指で描けます）</span>
+          <canvas id="src" class="pic" width="512" height="512" aria-label="元の絵。指やマウスで描けます"></canvas>
+        </div>
+        <div class="pic-box">
+          <span class="label">送られる絵 <span class="big-num" id="sizeLabel"></span></span>
+          <div class="stage"><canvas id="prev" class="pic dot" width="96" height="96" aria-label="送られる絵"></canvas><div class="scan" id="scanSend"></div></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="label">音の高さ</span>
+        <div class="seg" role="group" aria-label="音の高さ" id="bandSeg"></div>
+      </div>
+      <div class="row">
+        <span class="label">大きさ</span>
+        <div class="seg" role="group" aria-label="大きさ" id="modeSeg"></div>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="row">
+        <button id="btnSend">音で送る</button>
+        <button id="btnStopSend" class="sub" disabled>止める</button>
+        <button id="btnLoop" class="sub">この端末だけで確かめる</button>
+      </div>
+      <p class="msg" id="sendMsg" role="status"></p>
+      <div class="pic-box hidden" id="loopBox">
+        <span class="label">この端末の中で受け取った絵（雑音と反響を混ぜています）</span>
+        <canvas id="loopPic" class="rx-pic" width="96" height="96"></canvas>
+        <p class="note" id="loopMsg"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 受け取る ===================== -->
+  <section id="pRecv" role="tabpanel" aria-labelledby="tabRecv" class="wrap" style="gap:16px" hidden>
+    <div class="panel">
+      <div class="row">
+        <button id="btnListen">受け取りを開始</button>
+        <span class="status" id="status" data-s="off">止まっています</span>
+      </div>
+      <p class="msg" id="recvMsg" role="alert"></p>
+      <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+      <div class="stage"><canvas id="rxPic" class="rx-pic" width="96" height="96" aria-label="受け取った絵"></canvas><div class="scan" id="scanRecv"></div></div>
+      <div class="meta" id="meta">合図が聞こえると、ここに上から1行ずつ絵が出てきます</div>
+      <div class="row">
+        <button id="btnSave" class="sub" disabled>絵を保存する</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="試し方">
+    <h2>試し方</h2>
+    <ol class="how">
+      <li>まず「この端末だけで確かめる」を押します。音を鳴らさずに、この端末の中だけで送って受け取ります。実際と同じ速さで、上から絵が出てきます。</li>
+      <li>次に2台で試します。1台目で「受け取る」を開いて「受け取りを開始」を押し、2台目で絵を選んで「音で送る」を押します。</li>
+      <li>送っている間は、2台を動かさずに置いておきます。途中で動かすと、そこから絵がずれたり、ざらついたりします。</li>
+    </ol>
+    <h2>絵の乱れの読み方</h2>
+    <ul class="how">
+      <li><b>ざらざら</b>…雑音です。端末を近づけるか、音量を上げると減ります。</li>
+      <li><b>縦のすじ・二重に見える</b>…壁や机ではね返った音（反響）が、少し遅れて重なっています。広い場所や、柔らかい物の上で試すと減ります。</li>
+      <li><b>途中から横にずれる</b>…送る側と受け取る側の時計がわずかに違うか、途中で端末が動いたときに起きます。</li>
+    </ul>
+    <p class="note">宇宙ステーションから届く写真や、昔のFAXにも、同じ乱れが出ます。どちらもこのページと同じ「明るさを音の高さにする」しくみだからです。</p>
+  </section>
+
+</div>
+
+<script>
+// ===CORE START===
+/* ============================================================
+   しくみの中心（画面とは関係ない計算の部分）
+   明るさ → 音の高さ に置きかえて、1行ずつ送る（FAX や SSTV と同じ考え方）
+   ============================================================ */
+
+// ---- 使う音の高さ -------------------------------------------
+//   黒〜白：明るさを、この範囲の高さに置きかえる（黒いほど低く、白いほど高い）
+//   行の合図：行の始まりに一瞬だけ鳴らす、黒よりさらに低い音
+//   最初の合図：絵の始まりに0.4秒鳴らす。高さで「絵の大きさ」も伝える
+//              行の合図とまちがえないよう、行の合図から400Hz以上はなしてある
+const PBANDS = [
+  { id: 'audible', name: '聞こえる音',   black: 1500,  white: 2300,  sync: 1200,
+    heads: [2700, 2900, 3100],      ramp: 0.010, hp: 0,     minRms: 0.0008 },
+  { id: 'quiet',   name: '聞こえない音', black: 18100, white: 18900, sync: 17800,
+    heads: [17000, 17200, 17400],   ramp: 0.030, hp: 15000, minRms: 0.0002 },
+];
+// 絵の大きさと、1つの点（画素）を鳴らす長さ
+const PMODES = [
+  { id: 's', name: 'はやい', size: 64,  Tp: 0.0020, i: 0 },
+  { id: 'm', name: 'ふつう', size: 96,  Tp: 0.0022, i: 1 },
+  { id: 'l', name: 'きれい', size: 128, Tp: 0.0025, i: 2 },
+];
+const P_HEAD = 0.40;     // 最初の合図の長さ（秒）
+const P_SYNC = 0.010;    // 行の合図の長さ（秒）
+const P_PORCH = 0.005;   // 行の合図のあと、黒を少し鳴らす（区切りをはっきりさせる）
+const P_AMP = 0.5;
+function lineSec(m) { return P_SYNC + P_PORCH + m.size * m.Tp; }
+function pictureSec(m) { return P_HEAD + m.size * lineSec(m); }
+
+// ---- 絵（0〜255 の明るさの並び）→ 音の波 -----------------------
+function synthPicture(pix, mode, band, sr) {
+  const W = mode.size;
+  const total = Math.round((pictureSec(mode) + 0.05) * sr);
+  const out = new Float32Array(total);
+  const ramp = Math.round(band.ramp * sr);
+  const k = 1 - Math.exp(-1 / (0.0002 * sr));     // 高さを 0.0002 秒かけてなめらかに移す
+  const t0 = P_HEAD, Ls = lineSec(mode);
+  let phase = 0, fNow = band.heads[mode.i];
+  const nEnd = Math.round(pictureSec(mode) * sr);
+  for (let n = 0; n < total; n++) {
+    const t = n / sr;
+    let f;
+    if (t < t0) f = band.heads[mode.i];
+    else {
+      const u = t - t0;
+      const row = Math.min(W - 1, Math.floor(u / Ls));
+      const v = u - row * Ls;
+      if (v < P_SYNC) f = band.sync;
+      else if (v < P_SYNC + P_PORCH) f = band.black;
+      else {
+        const col = Math.min(W - 1, Math.floor((v - P_SYNC - P_PORCH) / mode.Tp));
+        f = band.black + (band.white - band.black) * pix[row * W + col] / 255;
+      }
+    }
+    fNow += (f - fNow) * k;
+    phase += 2 * Math.PI * fNow / sr;
+    if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+    let a = P_AMP;
+    if (n < ramp) a *= n / ramp;
+    if (n >= nEnd) a *= Math.max(0, 1 - (n - nEnd) / (total - nEnd));
+    out[n] = a * Math.sin(phase);
+  }
+  return out;
+}
+
+// ---- 決まった高さの強さ（ゲルツェル法）※第2段階と同じ ------------
+function goertzelP(x, start, len, f, sr) {
+  const c = 2 * Math.cos(2 * Math.PI * f / sr);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < len; i++) { const s0 = x[start + i] + c * s1 - s2; s2 = s1; s1 = s0; }
+  return s1 * s1 + s2 * s2 - c * s1 * s2;
+}
+
+// ---- 低い音を取り除くフィルタ ※第2段階と同じ ---------------------
+class HighPassP {
+  constructor(fc, sr) {
+    const w = 2 * Math.PI * fc / sr, cs = Math.cos(w), al = Math.sin(w) / (2 * Math.SQRT1_2);
+    const a0 = 1 + al;
+    this.c = [(1 + cs) / 2 / a0, -(1 + cs) / a0, (1 + cs) / 2 / a0, -2 * cs / a0, (1 - al) / a0];
+    this.st = [[0, 0, 0, 0], [0, 0, 0, 0]];
+  }
+  run(x) {
+    const [b0, b1, b2, a1, a2] = this.c;
+    let y = Float32Array.from(x);
+    for (const s of this.st) {
+      const out = new Float32Array(y.length);
+      for (let n = 0; n < y.length; n++) {
+        const v = y[n], o = b0 * v + b1 * s[0] + b2 * s[1] - a1 * s[2] - a2 * s[3];
+        s[1] = s[0]; s[0] = v; s[3] = s[2]; s[2] = o; out[n] = o;
+      }
+      y = out;
+    }
+    return y;
+  }
+}
+
+// 伸びる配列（受け取った分だけ足していく）
+class Grow {
+  constructor(n) { this.a = new Float32Array(n); this.n = 0; }
+  push(v) {
+    if (this.n === this.a.length) { const b = new Float32Array(this.a.length * 2); b.set(this.a); this.a = b; }
+    this.a[this.n++] = v;
+  }
+}
+
+// ---- 受け取る仕組み -----------------------------------------
+// 1. 0.01秒ずつ区切って「最初の合図」を探す（第2段階と同じやり方）。合図の高さで絵の大きさが分かる
+// 2. 同時に、音の高さを細かく（0.0005秒ごとに）測り続ける
+//      やり方：真ん中の高さの音を掛け合わせて、ずれ（回る向きと速さ）だけを取り出す。
+//      ずれが回る速さ ＝ 真ん中からどれだけ高い・低いか。音の大きさに左右されにくい。
+// 3. 合図が終わったところから、1行ぶんずつ「行の合図（いちばん低い音）」の位置を探して、
+//    ずれを直しながら、その行の点の明るさを読む
+class PicReceiver {
+  constructor(sr, on, band) {
+    this.sr = sr; this.on = on; this.band = band;
+    this.hp = band.hp ? new HighPassP(band.hp, sr) : null;
+    // 高さを測るための準備
+    this.fc = (band.sync + band.white) / 2;               // 真ん中の高さ
+    this.w = 2 * Math.PI * this.fc / sr;
+    this.cw = Math.cos(this.w); this.sw = Math.sin(this.w);
+    this.cr = 1; this.ci = 0;                             // いまの「回転」（掛け合わせる音）
+    const a = 1 - Math.exp(-2 * Math.PI * 1500 / sr);     // 1500Hz より速い揺れをならす
+    this.lpA = a; this.lp = new Float32Array(6);          // 3段ぶんの (実部, 虚部)
+    this.pr = 0; this.pi = 0;                             // 1つ前の値
+    this.D = Math.max(1, Math.round(sr * 0.0005));        // 0.0005 秒ごとにまとめる
+    this.acc = [0, 0, 0]; this.accN = 0;
+    this.bRe = new Grow(1 << 16); this.bIm = new Grow(1 << 16); this.bPow = new Grow(1 << 16);
+    this.bBase = 0;                                       // bRe.a[0] が何番目のまとまりか
+    // 合図さがし用
+    this.win = Math.round(0.01 * sr);
+    this.raw = new Float32Array(this.win); this.rawN = 0;
+    this.abs = 0;                                         // 受け取り開始から何個目の音か
+    this.reset();
+  }
+  reset() {
+    this.state = 'idle'; this.cand = null; this.count = 0; this.mode = null;
+    this.t0 = 0; this.row = 0; this.off = 0;
+  }
+  push(chunk) {
+    const x = this.hp ? this.hp.run(chunk) : chunk;
+    for (let n = 0; n < x.length; n++) {
+      const v = x[n];
+      // ① 0.01秒たまったら合図を調べる
+      this.raw[this.rawN++] = v;
+      if (this.rawN === this.win) { this.step(this.abs + n + 1 - this.win); this.rawN = 0; }
+      // ② 真ん中の高さで回して、ならす
+      let re = v * this.cr, im = -v * this.ci;
+      const nr = this.cr * this.cw - this.ci * this.sw, ni = this.ci * this.cw + this.cr * this.sw;
+      this.cr = nr; this.ci = ni;
+      const L = this.lp, A = this.lpA;
+      for (let s = 0; s < 3; s++) { L[2 * s] += A * (re - L[2 * s]); L[2 * s + 1] += A * (im - L[2 * s + 1]); re = L[2 * s]; im = L[2 * s + 1]; }
+      // 1つ前とのずれ（z × 1つ前のzの共役）を足していく
+      this.acc[0] += re * this.pr + im * this.pi;
+      this.acc[1] += im * this.pr - re * this.pi;
+      this.acc[2] += re * re + im * im;
+      this.pr = re; this.pi = im;
+      if (++this.accN === this.D) {
+        this.bRe.push(this.acc[0]); this.bIm.push(this.acc[1]); this.bPow.push(this.acc[2] / this.D);
+        this.acc = [0, 0, 0]; this.accN = 0;
+      }
+    }
+    // ときどき「回転」の大きさを 1 に戻す（計算のずれがたまらないように）
+    const m = Math.hypot(this.cr, this.ci); this.cr /= m; this.ci /= m;
+    this.abs += x.length;
+    if (this.state === 'image') this.readLines();
+    // 待っている間は、古い測定を捨てて最近の1秒ぶんだけ残す
+    if (this.state === 'idle' && this.bRe.n > 8000) this.trim(this.bRe.n - 2000);
+  }
+  trim(k) {
+    for (const g of [this.bRe, this.bIm, this.bPow]) { g.a.copyWithin(0, k, g.n); g.n -= k; }
+    this.bBase += k;
+  }
+  // 0.01秒ぶんの音で「最初の合図」を探す
+  step(absStart) {
+    const B = this.band, x = this.raw, n = this.win, sr = this.sr;
+    let e = 0; for (let i = 0; i < n; i++) e += x[i] * x[i];
+    const rms = Math.sqrt(e / n);
+    const purity = (f) => e > 1e-12 ? goertzelP(x, 0, n, f, sr) / (n / 2 * e) : 0;
+    let best = null, bp = 0;
+    for (const m of PMODES) { const p = purity(B.heads[m.i]); if (p > bp) { bp = p; best = m; } }
+    this.on('level', { band: B, head: bp, rms });
+    if (this.state === 'idle') {
+      if (rms > B.minRms && bp > 0.35) {
+        if (this.cand === best) this.count++; else { this.cand = best; this.count = 1; }
+        if (this.count >= 15) { this.state = 'head'; this.mode = best; this.on('start', { mode: best, band: B }); }
+      } else { this.cand = null; this.count = 0; }
+    } else if (this.state === 'head') {
+      if (purity(B.heads[this.mode.i]) < 0.15 || rms < B.minRms) {
+        this.state = 'image'; this.t0 = absStart; this.row = 0; this.off = 0;
+        this.on('begin', { mode: this.mode, band: B });
+      }
+    }
+  }
+  // 区間 [a, b)（音の番号）の高さを、音の強さで重みを付けて求める
+  freqAt(a, b) {
+    const D = this.D, B0 = this.bBase;
+    let i0 = Math.max(0, Math.floor(a / D) - B0), i1 = Math.min(this.bRe.n, Math.ceil(b / D) - B0);
+    if (i1 <= i0) i1 = i0 + 1;
+    let re = 0, im = 0;
+    for (let i = i0; i < i1 && i < this.bRe.n; i++) { re += this.bRe.a[i]; im += this.bIm.a[i]; }
+    return this.fc + Math.atan2(im, re) * this.sr / (2 * Math.PI);
+  }
+  readLines() {
+    const m = this.mode, B = this.band, sr = this.sr, D = this.D;
+    const Ls = lineSec(m) * sr, Ns = P_SYNC * sr, Np = P_PORCH * sr, Tp = m.Tp * sr;
+    const tol = (B.black - B.sync) / 2;                    // 行の合図とみなす幅（±150Hz）
+    const haveTo = (this.bBase + this.bRe.n) * D;
+    while (this.row < m.size) {
+      // 1行目は、合図の終わりの見当が0.01秒ほどずれるので広く探す。2行目からは狭く
+      const searchN = Math.round((this.row === 0 ? 0.018 : 0.004) * sr);
+      const exp = this.t0 + this.off + this.row * Ls;
+      if (haveTo < exp + Ls + searchN + 2 * D) return;      // まだ1行ぶんの音がそろっていない
+      // 行の合図（いちばん低い音）がいちばんよく重なる位置を探す
+      let bestP = 0, bestS = -1;
+      for (let d = -searchN; d <= searchN; d += D) {
+        let s = 0;
+        for (let q = 0; q < Ns; q += D) s += Math.abs(this.freqAt(exp + d + q, exp + d + q + D) - B.sync) < tol ? 1 : 0;
+        if (s > bestS) { bestS = s; bestP = d; }
+      }
+      // 合図がはっきり見つかったときだけ、少しずつずれを直す
+      if (this.row === 0) this.off += bestP;
+      else if (bestS >= 0.7 * Ns / D) this.off += 0.5 * bestP;
+      const start = this.t0 + this.off + this.row * Ls + Ns + Np;
+      const line = new Uint8ClampedArray(m.size);
+      for (let c = 0; c < m.size; c++) {
+        const a = start + c * Tp, b = a + Tp;
+        const f = this.freqAt(a + 0.15 * Tp, b - 0.15 * Tp);
+        line[c] = Math.round(255 * (f - B.black) / (B.white - B.black));
+      }
+      this.on('line', { row: this.row, line, mode: m, band: B, sync: bestS / (Ns / D) });
+      this.row++;
+    }
+    this.on('done', { mode: m, band: B });
+    this.reset();
+  }
+}
+// ===CORE END===
+
+/* ============================================================
+   画面の部分
+   ============================================================ */
+const $ = (id) => document.getElementById(id);
+let ctx = null;
+function ensureCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return ctx;
+}
+// iPhone の消音モードでも「聞こえない音」は鳴らす（第2段階と同じ）
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (_) {}
+}
+function bandOkP(band, sr) { return band.white + 500 < sr / 2; }
+
+// ---- タブ ---------------------------------------------------
+function showTab(which) {
+  const send = which === 'send';
+  $('tabSend').setAttribute('aria-selected', String(send));
+  $('tabRecv').setAttribute('aria-selected', String(!send));
+  $('pSend').hidden = !send;
+  $('pRecv').hidden = send;
+}
+$('tabSend').addEventListener('click', () => showTab('send'));
+$('tabRecv').addEventListener('click', () => showTab('recv'));
+if (location.hash === '#ukeru') showTab('recv');
+
+// ---- 選ぶボタン（音の高さ・大きさ） --------------------------
+function makeSeg(box, items, cur, label, onPick) {
+  for (const it of items) {
+    const b = document.createElement('button');
+    b.textContent = label(it);
+    b.setAttribute('aria-pressed', String(it === cur));
+    b.addEventListener('click', () => {
+      box.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      onPick(it);
+    });
+    box.appendChild(b);
+  }
+}
+let band = PBANDS[1], mode = PMODES[1];
+makeSeg($('bandSeg'), PBANDS, band, b => b.name, b => { band = b; refresh(); });
+makeSeg($('modeSeg'), PMODES, mode, m => m.name, m => { mode = m; refresh(); });
+
+// ---- 元の絵（描く・写真・見本） ------------------------------
+const src = $('src'), sctx = src.getContext('2d');
+function clearSrc() { sctx.fillStyle = '#fff'; sctx.fillRect(0, 0, src.width, src.height); }
+clearSrc();
+let pen = 'thick';
+document.querySelectorAll('#penSeg button').forEach(b => b.addEventListener('click', () => {
+  pen = b.dataset.pen;
+  document.querySelectorAll('#penSeg button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+}));
+$('btnClear').addEventListener('click', () => { clearSrc(); refresh(); });
+
+// 指・マウスで描く
+let drawing = null;
+function posOf(e) {
+  const r = src.getBoundingClientRect();
+  return [(e.clientX - r.left) * src.width / r.width, (e.clientY - r.top) * src.height / r.height];
+}
+src.addEventListener('pointerdown', (e) => {
+  if (playing) return;
+  src.setPointerCapture(e.pointerId);
+  drawing = posOf(e);
+  dot(drawing, drawing);
+});
+src.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  const p = posOf(e); dot(drawing, p); drawing = p;
+});
+['pointerup', 'pointercancel'].forEach(t => src.addEventListener(t, () => { if (drawing) { drawing = null; refresh(); } }));
+function dot(a, b) {
+  sctx.strokeStyle = pen === 'erase' ? '#fff' : '#111';
+  sctx.lineWidth = pen === 'thin' ? 10 : pen === 'thick' ? 26 : 48;
+  sctx.lineCap = 'round'; sctx.lineJoin = 'round';
+  sctx.beginPath(); sctx.moveTo(a[0], a[1]); sctx.lineTo(b[0], b[1]); sctx.stroke();
+  refreshSoon();
+}
+let soonTimer = 0;
+function refreshSoon() { if (!soonTimer) soonTimer = setTimeout(() => { soonTimer = 0; refresh(); }, 60); }
+
+// 絵の選び方の切り替え
+document.querySelectorAll('#srcSeg button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#srcSeg button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  const s = b.dataset.src;
+  $('drawTools').classList.toggle('hidden', s === 'sample');
+  $('photoTools').classList.toggle('hidden', s !== 'photo');
+  $('sampleTools').classList.toggle('hidden', s !== 'sample');
+  if (s === 'photo') $('filePhoto').click();
+  if (s === 'sample') drawSample('sea');
+}));
+
+// 写真：真ん中を正方形に切り取って入れる
+$('btnPhoto').addEventListener('click', () => $('filePhoto').click());
+$('filePhoto').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const s = Math.min(img.width, img.height);
+    clearSrc();
+    sctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, src.width, src.height);
+    URL.revokeObjectURL(img.src);
+    refresh();
+  };
+  img.src = URL.createObjectURL(f);
+  e.target.value = '';
+});
+
+// 見本の絵（このページで描いている）
+function drawSample(kind) {
+  const c = sctx, W = src.width;
+  clearSrc();
+  if (kind === 'sea') {
+    const g = c.createLinearGradient(0, 0, 0, W * 0.6); g.addColorStop(0, '#fff'); g.addColorStop(1, '#bbb');
+    c.fillStyle = g; c.fillRect(0, 0, W, W * 0.6);
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(W * 0.7, W * 0.3, W * 0.12, 0, 7); c.fill();
+    c.strokeStyle = '#333'; c.lineWidth = 8; c.stroke();
+    for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6; c.beginPath(); c.moveTo(W * 0.7 + Math.cos(a) * W * 0.16, W * 0.3 + Math.sin(a) * W * 0.16); c.lineTo(W * 0.7 + Math.cos(a) * W * 0.21, W * 0.3 + Math.sin(a) * W * 0.21); c.stroke(); }
+    c.fillStyle = '#555'; c.fillRect(0, W * 0.6, W, W * 0.4);
+    c.strokeStyle = '#ddd'; c.lineWidth = 10;
+    for (let y = 0; y < 4; y++) { c.beginPath(); for (let x = 0; x <= W; x += 8) { const yy = W * (0.68 + y * 0.08) + Math.sin(x / 30 + y) * 10; x ? c.lineTo(x, yy) : c.moveTo(x, yy); } c.stroke(); }
+  } else if (kind === 'face') {
+    c.fillStyle = '#ddd'; c.beginPath(); c.arc(W / 2, W / 2, W * 0.38, 0, 7); c.fill();
+    c.strokeStyle = '#111'; c.lineWidth = 16; c.stroke();
+    c.fillStyle = '#111'; c.beginPath(); c.arc(W * 0.37, W * 0.42, W * 0.05, 0, 7); c.arc(W * 0.63, W * 0.42, W * 0.05, 0, 7); c.fill();
+    c.lineWidth = 18; c.lineCap = 'round'; c.beginPath(); c.arc(W / 2, W * 0.52, W * 0.2, 0.2 * Math.PI, 0.8 * Math.PI); c.stroke();
+  } else if (kind === 'text') {
+    c.fillStyle = '#111'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold ' + W * 0.2 + 'px ' + getComputedStyle(document.body).fontFamily;
+    c.fillText('音で', W / 2, W * 0.32); c.fillText('とどいた', W / 2, W * 0.64);
+  } else {
+    for (let i = 0; i < 8; i++) { c.fillStyle = `rgb(${i * 36},${i * 36},${i * 36})`; c.fillRect(i * W / 8, 0, W / 8, W * 0.5); }
+    for (let i = 0; i < 16; i++) { c.fillStyle = i % 2 ? '#fff' : '#111'; c.fillRect(i * W / 16, W * 0.5, W / 16, W * 0.5); }
+  }
+  refresh();
+}
+document.querySelectorAll('.smp').forEach(b => b.addEventListener('click', () => drawSample(b.dataset.s)));
+
+// ---- 元の絵 → 送られる絵（小さく・白黒に） ---------------------
+// 写真は明るさの幅が狭いことが多いので、いちばん暗い所を黒、いちばん明るい所を白に広げる
+let pix = null;
+function makePix() {
+  const S = mode.size, t = document.createElement('canvas');
+  t.width = t.height = S;
+  const tc = t.getContext('2d');
+  tc.imageSmoothingQuality = 'high';
+  tc.drawImage(src, 0, 0, S, S);
+  const d = tc.getImageData(0, 0, S, S).data;
+  const g = new Float32Array(S * S);
+  for (let i = 0; i < S * S; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
+  const sorted = Float32Array.from(g).sort();
+  const lo = sorted[Math.floor(S * S * 0.01)], hi = sorted[Math.floor(S * S * 0.99)];
+  const out = new Uint8ClampedArray(S * S);
+  for (let i = 0; i < S * S; i++) out[i] = hi - lo > 40 ? 255 * (g[i] - lo) / (hi - lo) : g[i];
+  return out;
+}
+function drawPix(canvas, S, data) {
+  canvas.width = S; canvas.height = S;
+  const c = canvas.getContext('2d'), im = c.createImageData(S, S);
+  for (let i = 0; i < S * S; i++) { const v = data[i]; im.data.set([v, v, v, 255], 4 * i); }
+  c.putImageData(im, 0, 0);
+}
+function refresh() {
+  pix = makePix();
+  drawPix($('prev'), mode.size, pix);
+  $('sizeLabel').textContent = mode.size + '×' + mode.size;
+  $('count').textContent = '約' + Math.round(pictureSec(mode)) + '秒';
+  $('btnSend').disabled = !!playing;
+}
+
+// ---- 音で送る -----------------------------------------------
+let playing = null;
+async function send() {
+  if (playing || loopRun) return;
+  if (!listening) setAudioSession(band.id === 'quiet' ? 'playback' : 'auto');
+  ensureCtx(); await ctx.resume();
+  if (!bandOkP(band, ctx.sampleRate)) {
+    $('sendMsg').textContent = 'この端末の音の設定（' + ctx.sampleRate + 'Hz）では、聞こえない音を鳴らせません。Bluetoothのイヤホンなどを外してください。';
+    return;
+  }
+  const m = mode, wave = synthPicture(pix, m, band, ctx.sampleRate);
+  const buf = ctx.createBuffer(1, wave.length, ctx.sampleRate);
+  buf.copyToChannel(wave, 0);
+  const s = ctx.createBufferSource();
+  s.buffer = buf; s.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.05;
+  s.start(t0);
+  playing = { src: s, t0, m };
+  s.onended = endSend;
+  $('btnSend').disabled = true; $('btnStopSend').disabled = false; $('btnLoop').disabled = true;
+  $('sendMsg').textContent = '送っています。2台とも動かさずに置いておいてください。';
+  requestAnimationFrame(tickSend);
+}
+function tickSend() {
+  if (!playing) return;
+  const t = ctx.currentTime - playing.t0 - P_HEAD;
+  const sc = $('scanSend');
+  if (t > 0) {
+    const row = Math.min(playing.m.size, t / lineSec(playing.m));
+    sc.style.display = 'block';
+    sc.style.top = (row / playing.m.size * 100) + '%';
+  }
+  requestAnimationFrame(tickSend);
+}
+function endSend() {
+  if (playing) { try { playing.src.stop(); } catch (_) {} }
+  const finished = playing && ctx.currentTime - playing.t0 >= pictureSec(playing.m) - 0.1;
+  playing = null;
+  if (!listening) setAudioSession('auto');
+  $('scanSend').style.display = 'none';
+  $('btnStopSend').disabled = true; $('btnLoop').disabled = false;
+  $('sendMsg').textContent = finished ? '送り終わりました。' : '';
+  refresh();
+}
+$('btnSend').addEventListener('click', send);
+$('btnStopSend').addEventListener('click', endSend);
+
+// ---- この端末だけで確かめる -----------------------------------
+// 作った音に雑音と反響を混ぜて、実際と同じ速さで受け取り役に渡す（音は鳴らさない）
+let loopRun = null;
+function loopTest() {
+  if (loopRun) { stopLoop(); return; }
+  const sr = 48000, m = mode, bd = band;
+  const w = synthPicture(pix, m, bd, sr);
+  const pre = Math.round(0.3 * sr), x = new Float32Array(pre + w.length + Math.round(0.3 * sr));
+  x.set(w, pre);
+  const d1 = Math.round(0.006 * sr), d2 = Math.round(0.017 * sr);
+  const y = new Float32Array(x.length);
+  for (let n = 0; n < x.length; n++) {
+    y[n] = 0.4 * x[n] + (n >= d1 ? 0.12 * x[n - d1] : 0) + (n >= d2 ? 0.06 * x[n - d2] : 0)   // 反響
+         + 0.01 * (Math.random() * 2 - 1)                                                   // 雑音
+         + 0.05 * Math.sin(2 * Math.PI * 150 * n / sr);                                     // 低い物音
+  }
+  $('loopBox').classList.remove('hidden');
+  const view = makeView($('loopPic'), null, (k, d) => {
+    if (k === 'start') $('loopMsg').textContent = '合図を受け取りました（' + d.band.name + '・' + d.mode.name + '）';
+    if (k === 'line') $('loopMsg').textContent = '受け取り中… ' + (d.row + 1) + ' / ' + d.mode.size + '行';
+    if (k === 'done') { $('loopMsg').textContent = '受け取りました（' + d.band.name + '・' + d.mode.name + '）。「送られる絵」と見比べてみてください。'; stopLoop(); }
+  });
+  const rs = PBANDS.map(b => new PicReceiver(sr, view.on, b));
+  let i = 0;
+  const step = 4096, ms = step / sr * 1000;
+  loopRun = setInterval(() => {
+    const ch = y.subarray(i, i + step);
+    for (const r of rs) r.push(ch);
+    i += step;
+    if (i >= y.length) stopLoop();
+  }, ms);
+  $('btnLoop').textContent = 'やめる';
+  $('btnSend').disabled = true;
+  $('loopBox').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function stopLoop() {
+  clearInterval(loopRun); loopRun = null;
+  $('btnLoop').textContent = 'この端末だけで確かめる';
+  $('btnSend').disabled = !!playing;
+}
+$('btnLoop').addEventListener('click', loopTest);
+
+// ---- 受け取った行を描く（受け取る画面と「確かめる」で共通） ------
+function makeView(canvas, scan, cb) {
+  let S = 0, c = null;
+  return {
+    on(type, d) {
+      if (type === 'begin') {
+        S = d.mode.size; canvas.width = S; canvas.height = S;
+        c = canvas.getContext('2d'); c.fillStyle = '#1b2321'; c.fillRect(0, 0, S, S);
+      }
+      if (type === 'line' && c) {
+        const im = c.createImageData(S, 1);
+        for (let x = 0; x < S; x++) { const v = d.line[x]; im.data[4 * x] = v; im.data[4 * x + 1] = v; im.data[4 * x + 2] = v; im.data[4 * x + 3] = 255; }
+        c.putImageData(im, 0, d.row);
+        if (scan) { scan.style.display = 'block'; scan.style.top = ((d.row + 1) / S * 100) + '%'; }
+      }
+      if (type === 'done' && scan) scan.style.display = 'none';
+      if (cb && type !== 'level') cb(type, d);
+    },
+  };
+}
+
+// ---- 受け取る -----------------------------------------------
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  constructor(){ super(); this.b = new Float32Array(2048); this.n = 0; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      this.b[this.n++] = ch[i];
+      if (this.n === 2048) { this.port.postMessage(this.b.slice(0)); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('oto-tap', Tap);`;
+let workletReady = false;
+let listening = null;
+function setStatus(s, text) { const el = $('status'); el.dataset.s = s; el.textContent = text; }
+
+async function openTap(stream, onChunk) {
+  const s = ctx.createMediaStreamSource(stream);
+  const sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
+  try {
+    if (!ctx.audioWorklet) throw new Error('no worklet');
+    if (!workletReady) {
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      workletReady = true;
+    }
+    const node = new AudioWorkletNode(ctx, 'oto-tap');
+    node.port.onmessage = (e) => onChunk(e.data);
+    s.connect(node); node.connect(sink);
+    return () => { s.disconnect(); node.disconnect(); sink.disconnect(); };
+  } catch (_) {
+    const sp = ctx.createScriptProcessor(2048, 1, 1);
+    sp.onaudioprocess = (e) => onChunk(new Float32Array(e.inputBuffer.getChannelData(0)));
+    s.connect(sp); sp.connect(sink);
+    return () => { s.disconnect(); sp.disconnect(); sink.disconnect(); };
+  }
+}
+
+const rxView = makeView($('rxPic'), $('scanRecv'), (type, d) => {
+  if (type === 'start') { setStatus('sig', '合図を受信（' + d.band.name + '・' + d.mode.name + '）'); $('recvMsg').textContent = ''; $('prog').style.width = '0%'; }
+  if (type === 'begin') { setStatus('recv', '受信中'); busy = d.band.id; $('btnSave').disabled = true; }
+  if (type === 'line') {
+    $('prog').style.width = ((d.row + 1) / d.mode.size * 100).toFixed(0) + '%';
+    $('meta').textContent = (d.row + 1) + ' / ' + d.mode.size + '行　' + d.band.name + '・' + d.mode.name;
+  }
+  if (type === 'done') {
+    busy = null;
+    setStatus('ok', '受け取りました');
+    $('meta').textContent = d.mode.size + '×' + d.mode.size + '　' + d.band.name + '・' + d.mode.name + '　を受け取りました';
+    $('btnSave').disabled = false;
+    setTimeout(() => { if (listening && !busy) setStatus('listen', '合図を待っています'); }, 2500);
+  }
+});
+let busy = null;   // いま絵を受け取っている帯域（同時に2枚描かないように）
+
+async function startListen() {
+  $('recvMsg').textContent = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $('recvMsg').textContent = 'このページではマイクが使えません。https のページで開いてください。';
+    return;
+  }
+  setAudioSession('play-and-record');
+  ensureCtx(); await ctx.resume();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+  } catch (e) {
+    $('recvMsg').textContent = e.name === 'NotAllowedError'
+      ? 'マイクの使用が許可されませんでした。アドレス欄のマイク表示から許可してください。'
+      : 'マイクを開けませんでした（' + e.name + '）。';
+    return;
+  }
+  const on = (type, d) => { if (busy && d.band && d.band.id !== busy && type !== 'level') return; rxView.on(type, d); };
+  const rxs = PBANDS.filter(b => bandOkP(b, ctx.sampleRate)).map(b => new PicReceiver(ctx.sampleRate, on, b));
+  if (rxs.length < PBANDS.length) $('recvMsg').textContent = 'この端末の音の設定（' + ctx.sampleRate + 'Hz）では、聞こえない音は受け取れません。聞こえる音だけ待ちます。';
+  const close = await openTap(stream, (c) => { for (const r of rxs) r.push(c); });
+  listening = { stream, close };
+  $('btnListen').textContent = '受け取りを止める';
+  setStatus('listen', '合図を待っています');
+}
+function stopListen() {
+  if (!listening) return;
+  listening.close();
+  listening.stream.getTracks().forEach(t => t.stop());
+  listening = null; busy = null;
+  setAudioSession('auto');
+  $('btnListen').textContent = '受け取りを開始';
+  setStatus('off', '止まっています');
+  $('scanRecv').style.display = 'none';
+}
+$('btnListen').addEventListener('click', () => listening ? stopListen() : startListen());
+
+// 受け取った絵を保存（大きくしてから、点がぼやけないように）
+$('btnSave').addEventListener('click', () => {
+  const s = $('rxPic'), k = Math.max(1, Math.floor(512 / s.width));
+  const t = document.createElement('canvas'); t.width = s.width * k; t.height = s.height * k;
+  const c = t.getContext('2d'); c.imageSmoothingEnabled = false; c.drawImage(s, 0, 0, t.width, t.height);
+  const a = document.createElement('a');
+  const d = new Date();
+  a.download = 'oto-e-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + String(d.getSeconds()).padStart(2, '0') + '.png';
+  a.href = t.toDataURL('image/png');
+  a.click();
+});
+
+// ---- はじめの表示 -------------------------------------------
+refresh();
+if (!window.isSecureContext) $('recvMsg').textContent = 'https ではないため、マイクが使えない可能性があります。';
+</script>
+<p id="offlineState" style="max-width:720px;margin:8px auto 24px;padding:0 16px;font-size:.8rem;color:var(--muted)"></p>
+<script>
+/* オフライン対応：一度開くとページを端末にしまい、圏外でも開けるようにする（中身は sw.js） */
+(function () {
+  const el = document.getElementById('offlineState');
+  const show = () => {
+    if (!('serviceWorker' in navigator)) { el.textContent = ''; return; }
+    const ready = !!navigator.serviceWorker.controller;
+    if (!navigator.onLine) el.textContent = ready ? 'いまはネットにつながっていません。端末にしまってあるページで動いています。' : '';
+    else el.textContent = ready ? 'このページは端末にしまってあります。ネットがなくても開けます。' : '';
+  };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(show).catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', show);
+  }
+  addEventListener('online', show); addEventListener('offline', show);
+  show();
+})();
+</script>
+</body>
+</html>
