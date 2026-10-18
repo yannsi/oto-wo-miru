@@ -96,6 +96,13 @@ button{
 }
 button.sub{background:transparent; color:var(--accent)}
 button.chipbtn{min-height:36px; padding:4px 10px; font-weight:400; font-size:.9rem}
+.grow{flex:1}
+.phr{display:flex; flex-direction:column; gap:8px; padding:10px; border:1px dashed var(--line); border-radius:8px}
+#phrases:empty::before{content:"まだありません。文字を入れて「＋ いまの文字を保存」を押すと、ここに並びます。"; font-size:.85rem; color:var(--muted)}
+#phrases.editing button.chipbtn{border-color:var(--ng); color:var(--ng)}
+#phrases.editing button.chipbtn::before{content:"× "}
+button[aria-pressed="true"].chipbtn{background:var(--accent); color:var(--accent-fg)}
+.linkbtn{border:0; background:none; color:var(--accent); text-decoration:underline; min-height:0; padding:0 4px; font-weight:700; font-size:inherit}
 button:disabled{opacity:.45; cursor:default}
 button:focus-visible, textarea:focus-visible, input:focus-visible{outline:3px solid var(--tone); outline-offset:2px}
 
@@ -186,12 +193,18 @@ ol.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4p
     <div class="panel">
       <label class="label" for="txt">送る文字</label>
       <textarea id="txt" maxlength="60" rows="2">12番</textarea>
-      <div class="row">
-        <span class="label">例</span>
-        <button class="sub chipbtn ex">12番</button>
-        <button class="sub chipbtn ex">OK</button>
-        <button class="sub chipbtn ex">こんにちは</button>
-        <button class="sub chipbtn ex">診察室2へどうぞ</button>
+      <div class="phr">
+        <div class="row">
+          <span class="label">定型文</span>
+          <span class="grow"></span>
+          <button id="btnSavePhrase" class="sub chipbtn">＋ いまの文字を保存</button>
+          <button id="btnEditPhrase" class="sub chipbtn" aria-pressed="false">編集</button>
+        </div>
+        <div class="row" id="phrases" aria-label="定型文"></div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="optQuick"> 定型文を押したら、すぐ音で送る</label>
+        </div>
+        <p class="note" id="phraseMsg" role="status"></p>
       </div>
       <div class="row">
         <span class="label">音の高さ</span>
@@ -657,7 +670,80 @@ function refresh() {
   chips = n <= MAX_LEN ? buildFrameView(text) : [];
 }
 $('txt').addEventListener('input', refresh);
-document.querySelectorAll('.ex').forEach(b => b.addEventListener('click', () => { $('txt').value = b.textContent; refresh(); }));
+
+// ---- 定型文 -------------------------------------------------
+// よく使う文字を、この端末の中（ブラウザの保存場所）にしまっておく。
+// ネットには送らないので、オフラインでも使える。別の端末やブラウザとは共有されない。
+const PHRASE_KEY = 'oto-okuru-phrases';
+const QUICK_KEY = 'oto-okuru-quick';
+const PHRASE_MAX = 30;
+const PHRASE_DEFAULT = ['12番', 'OK', 'こんにちは', '診察室2へどうぞ'];
+function loadPhrases() {
+  try {
+    const v = JSON.parse(localStorage.getItem(PHRASE_KEY));
+    if (Array.isArray(v)) return v.filter(x => typeof x === 'string');
+  } catch (_) {}
+  return PHRASE_DEFAULT.slice();
+}
+let phrases = loadPhrases();
+let editing = false;
+function savePhrases() {
+  try { localStorage.setItem(PHRASE_KEY, JSON.stringify(phrases)); return true; }
+  catch (_) { $('phraseMsg').textContent = 'この端末では保存できませんでした（プライベートブラウズ中など）。'; return false; }
+}
+function drawPhrases() {
+  const box = $('phrases');
+  box.textContent = '';
+  box.classList.toggle('editing', editing);
+  phrases.forEach((t, i) => {
+    const b = document.createElement('button');
+    b.className = 'sub chipbtn';
+    b.textContent = t;
+    b.setAttribute('aria-label', editing ? t + ' を消す' : t);
+    b.addEventListener('click', () => editing ? removePhrase(i) : usePhrase(t));
+    box.appendChild(b);
+  });
+  $('btnEditPhrase').textContent = editing ? '終わる' : '編集';
+  $('btnEditPhrase').setAttribute('aria-pressed', String(editing));
+  $('btnEditPhrase').hidden = phrases.length === 0 && !editing;
+}
+function usePhrase(t) {
+  $('txt').value = t; refresh();
+  if ($('optQuick').checked && !playing && !$('btnSend').disabled) send();
+}
+function addPhrase() {
+  const t = $('txt').value.trim();
+  const msg = $('phraseMsg');
+  if (!t) { msg.textContent = '送る文字の欄に、保存したい文字を入れてください。'; return; }
+  if (textToBytes(t).length > MAX_LEN) { msg.textContent = '長すぎて送れない文字は保存できません。'; return; }
+  if (phrases.includes(t)) { msg.textContent = '「' + t + '」はもう保存してあります。'; return; }
+  if (phrases.length >= PHRASE_MAX) { msg.textContent = '定型文は' + PHRASE_MAX + '個までです。いらないものを「編集」から消してください。'; return; }
+  phrases.push(t);
+  if (savePhrases()) msg.textContent = '「' + t + '」を保存しました。';
+  drawPhrases();
+}
+function removePhrase(i) {
+  const [t] = phrases.splice(i, 1);
+  savePhrases();
+  if (phrases.length === 0) editing = false;
+  drawPhrases();
+  // まちがえて消したときのために「元に戻す」を出す
+  const msg = $('phraseMsg');
+  msg.textContent = '「' + t + '」を消しました。';
+  const undo = document.createElement('button');
+  undo.className = 'linkbtn'; undo.textContent = '元に戻す';
+  undo.addEventListener('click', () => {
+    phrases.splice(Math.min(i, phrases.length), 0, t);
+    savePhrases(); drawPhrases();
+    msg.textContent = '「' + t + '」を戻しました。';
+  });
+  msg.appendChild(undo);
+}
+$('btnSavePhrase').addEventListener('click', addPhrase);
+$('btnEditPhrase').addEventListener('click', () => { editing = !editing; $('phraseMsg').textContent = editing ? '消したい定型文を押してください。' : ''; drawPhrases(); });
+try { $('optQuick').checked = localStorage.getItem(QUICK_KEY) === '1'; } catch (_) {}
+$('optQuick').addEventListener('change', (e) => { try { localStorage.setItem(QUICK_KEY, e.target.checked ? '1' : '0'); } catch (_) {} });
+drawPhrases();
 
 // ---- 音で送る -----------------------------------------------
 let playing = null;
