@@ -258,6 +258,7 @@ ol.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4p
       <li>うまくいかないときは、端末を近づける、音量を上げる、速さを「ゆっくり」にする、の順に試してください。音の高さと速さは合図の音で伝わるので、受け取る側で選ぶ必要はありません。</li>
       <li>「聞こえない音」は、スピーカーとマイクを向かい合わせ、30cm以内から始めてください。高い音は、低い音より遠くまで届きにくく、物にさえぎられやすい性質があります。第1段階の「音を見る」を〜20kHzにすると、届いているか目で確かめられます。</li>
     </ol>
+    <p class="note">iPhoneで「聞こえない音」を送るときは、消音モード（マナーモード）でも鳴るようにしています（iOS 16.4以降）。聞こえる音は、これまでどおり消音モードでは鳴りません。</p>
     <p class="note">iPhoneはウェブページから振動させられないため、受け取った合図は画面の光で知らせます。受け取り中の端末から送ると、音が小さくなることがあります。</p>
   </section>
 
@@ -542,6 +543,16 @@ function bytesToText(b) { return dec.decode(new Uint8Array(b)); }
    ============================================================ */
 const $ = (id) => document.getElementById(id);
 let ctx = null;
+
+// ---- 消音モードでも鳴らす（iPhone の Safari 16.4 以降）---------------
+// iPhone は消音モード（マナーモード）のとき、ふだんWebページの音を鳴らさない。
+// 「聞こえない音」で送るときだけ、音楽アプリと同じ扱い（playback）にして鳴るようにする。
+// 聞こえる音のときは、これまでどおり消音モードに従う。
+// 受け取るときは、マイクを使う扱い（play-and-record）にする。
+// この仕組みがないブラウザ（Android や PC）では何もしない。もともと消音モードの影響を受けにくい。
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (_) {}
+}
 function ensureCtx() {
   if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
   return ctx;
@@ -653,6 +664,7 @@ let playing = null;
 async function send() {
   const text = $('txt').value;
   const bits = bytesToBits(frameBytes(textToBytes(text)));
+  if (!listening) setAudioSession(band.id === 'quiet' ? 'playback' : 'auto');
   ensureCtx(); await ctx.resume();
   if (!bandOk(band, ctx.sampleRate)) {
     $('sendMsg').textContent = 'この端末の音の設定（' + ctx.sampleRate + 'Hz）では、聞こえない音を鳴らせません。Bluetoothのイヤホンなどを外してください。';
@@ -684,6 +696,7 @@ function tickSend() {
 function endSend() {
   if (playing) { try { playing.src.stop(); } catch (_) {} }
   playing = null;
+  if (!listening) setAudioSession('auto');
   chips.forEach(c => c.classList.remove('now', 'done'));
   $('btnStopSend').disabled = true;
   refresh();
@@ -783,6 +796,7 @@ async function startListen() {
     $('recvMsg').textContent = 'このページではマイクが使えません。https のページで開いてください。';
     return;
   }
+  setAudioSession('play-and-record');
   ensureCtx(); await ctx.resume();
   let stream;
   try {
@@ -808,6 +822,7 @@ function stopListen() {
   listening.close();
   listening.stream.getTracks().forEach(t => t.stop());
   listening = null;
+  setAudioSession('auto');
   $('btnListen').textContent = '受け取りを開始';
   setStatus('off', '止まっています');
   ['mS', 'm0', 'm1'].forEach(id => $(id).style.width = '0%');
