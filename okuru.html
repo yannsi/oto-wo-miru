@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0d7366">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="音で送る">
 <title>音で文字を送る</title>
 <!--
   音で文字を送る（音でデータを送る・第2段階）
@@ -876,6 +883,25 @@ function drawMeters() {
 // ---- はじめの表示 -------------------------------------------
 refresh();
 if (!window.isSecureContext) $('recvMsg').textContent = 'https ではないため、マイクが使えない可能性があります。';
+</script>
+<p id="offlineState" style="max-width:720px;margin:8px auto 24px;padding:0 16px;font-size:.8rem;color:var(--muted)"></p>
+<script>
+/* オフライン対応：一度開くとページを端末にしまい、圏外でも開けるようにする（中身は sw.js） */
+(function () {
+  const el = document.getElementById('offlineState');
+  const show = () => {
+    if (!('serviceWorker' in navigator)) { el.textContent = ''; return; }
+    const ready = !!navigator.serviceWorker.controller;
+    if (!navigator.onLine) el.textContent = ready ? 'いまはネットにつながっていません。端末にしまってあるページで動いています。' : '';
+    else el.textContent = ready ? 'このページは端末にしまってあります。ネットがなくても開けます。' : '';
+  };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(show).catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', show);
+  }
+  addEventListener('online', show); addEventListener('offline', show);
+  show();
+})();
 </script>
 </body>
 </html>
