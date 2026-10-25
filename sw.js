@@ -9,7 +9,7 @@
   - 書体（Google Fonts）… 一度読んだ分をしまっておき、次からはそれを使う。
   ページを直したら、下の VERSION を1つ上げると、古いしまい物が片付きます。
 */
-const VERSION = 'v5';
+const VERSION = 'v6';
 const PAGES = 'oto-pages-' + VERSION;
 const FONTS = 'oto-fonts-' + VERSION;
 const CORE = [
@@ -28,9 +28,10 @@ self.addEventListener('install', (e) => {
 });
 
 self.addEventListener('activate', (e) => {
+  // 同じ yannsi.github.io にある他の作品の保存は消さない（自分の古い版だけ消す）
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== PAGES && k !== FONTS).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('oto-') && k !== PAGES && k !== FONTS).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
