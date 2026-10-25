@@ -182,6 +182,7 @@ ol.how, ul.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column
     <div class="crumb"><a href="./">← 第1段階　音を見る</a><a href="okuru.html">第2段階　音で文字を送る</a><a href="e.html">第3段階　音で絵を送る</a></div>
     <h1>音でファイルを送る</h1>
     <p class="lead">音でデータを送る・第4段階　ファイルを小さな包み（パケット）に分け、壊れても直せる符号を付けて、1バイトも違わずに届けます</p>
+    <p class="lead"><b>送れるのは、数KBまでの短い文字のファイルです。</b>音で送れるのは1秒に約15バイトなので、PDFや写真のような大きなファイルには向きません（100KBで約2時間かかります）。</p>
   </header>
 
   <div class="tabs" role="tablist" aria-label="使い方の切り替え">
@@ -213,7 +214,7 @@ ol.how, ul.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column
       <div id="srcPick" class="row" hidden>
         <button id="btnPick" class="sub">ファイルを選ぶ</button>
         <input type="file" id="filePick">
-        <span class="note" id="pickName">まだ選んでいません。小さなファイル（数KBまで）がおすすめです。</span>
+        <span class="note" id="pickName">まだ選んでいません。送れるのは数KBまでの小さなファイルです。PDFや写真は大きすぎて向きません。</span>
       </div>
       <label class="check"><input type="checkbox" id="optSqueeze" checked> ちぢめてから送る（文字のファイルは小さくなり、早く届きます）</label>
 
@@ -895,7 +896,8 @@ function showInfo() {
       ? fmtBytes(prep.sent.length) + '（' + Math.round(prep.sent.length / prep.raw.length * 100) + '%）'
       : 'あまり小さくならないので、そのまま送ります', prep.packed ? 'num' : null);
     if (prep.sent.length > MAX_SEND) {
-      msg.textContent = '大きすぎて送れません。送れるのは' + (prep.packed ? 'ちぢめたあとで' : '') + fmtBytes(MAX_SEND) + 'までです。';
+      msg.textContent = '大きすぎて送れません。送れるのは' + (prep.packed ? 'ちぢめたあとで' : '') + fmtBytes(MAX_SEND) + 'までです。'
+        + '音で送れるのは1秒に約15バイトなので、数KBまでの短い文字のファイル向けです。PDFや写真は、必要な文字だけを「文字を書いて送る」に書き写して送ってください。';
       can = false;
     } else {
       add('パケット', '表紙1 ＋ 中身' + (prep.total - 1) + ' ＝ ' + prep.total + '個', 'num');
