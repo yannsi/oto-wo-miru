@@ -1,0 +1,1405 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0d7366">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="音で送る">
+<title>音でファイルを送る</title>
+<!--
+  音でファイルを送る（音でデータを送る・第4段階）
+  ------------------------------------------------------------
+  ファイル → 64バイトずつのパケット → 直すための符号を付ける → 16の高さの音 → 空気
+  → マイク → 16の高さを聞き分ける → 符号で直す → 検査 → 並べ直す → ファイル
+
+  第2段階との違い
+    第2段階は2つの高さ（0か1か）で、1回の音で1ビット。最大60バイト。
+    第4段階は16の高さで、1回の音で4ビット（MFSK）。パケットに分けるので長いファイルも送れる。
+    リード・ソロモン符号で、1つのパケットの中の8バイトまでは、壊れても受け取る側で元に戻せる。
+    それでも直せなかったパケットは、くり返し送ったときの次の周で埋める。
+
+  音の高さ          データの16の高さ            合図（ゆっくり／ふつう／はやい）
+    聞こえる音     1300〜2800Hz（100Hzおき）   700 / 900 / 1100Hz
+    聞こえない音  17700〜19200Hz（100Hzおき）  16900 / 17100 / 17300Hz
+
+  1つのパケット
+    [合図 0.16秒] [同期 6音] [ファイル番号][パケット番号][全部の数] [中身 64バイト] [検査 CRC-16] [直すための符号 16バイト]
+    0番のパケット（表紙）の中身は、ファイル名・大きさ・ファイル全体の指紋（CRC-32）・ちぢめたか
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@400;700&family=BIZ+UDPGothic:wght@400;700&display=swap">
+<style>
+/* レイアウト: 上で「送る／受け取る」を切り替え、下に各パネル。第1〜3段階と同じ色と書体 */
+:root{
+  --bg:#eef2f1; --surface:#ffffff; --fg:#1b2321; --muted:#5a6764; --line:#d3dbd9;
+  --accent:#0d7366; --accent-fg:#ffffff; --tone:#b0521c;
+  --sig:#7a5bb5;       /* 合図 */
+  --num:#2f6fb0;       /* 番号 */
+  --body:#0d7366;      /* 中身 */
+  --chk:#1f7a3d;       /* 検査 */
+  --fix:#b0521c;       /* 直すための符号・直したパケット */
+  --ok:#1f7a3d; --ng:#b3261e;
+  --chip:#f3f6f5;
+  --flash:#ffe08a;
+  --font-ui:"BIZ UDPGothic","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  --font-num:"BIZ UDGothic",ui-monospace,"Menlo","Consolas",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+    --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+    --sig:#b39ae6; --num:#6fa8e0; --body:#3fb3a2; --chk:#5cc47e; --fix:#e88a55;
+    --ok:#5cc47e; --ng:#f07a72; --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111716; --surface:#19211f; --fg:#e4ecea; --muted:#9aa9a5; --line:#2c3836;
+  --accent:#3fb3a2; --accent-fg:#06110f; --tone:#e88a55;
+  --sig:#b39ae6; --num:#6fa8e0; --body:#3fb3a2; --chk:#5cc47e; --fix:#e88a55;
+  --ok:#5cc47e; --ng:#f07a72; --chip:#202a28; --flash:#6b5a1c; color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:var(--font-ui); font-size:15px; line-height:1.7;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  padding-block:max(16px, env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-bottom, 0px));
+  transition:background-color .15s;
+}
+body.flash{background:var(--flash)}
+.wrap{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+header{display:flex; flex-direction:column; gap:2px}
+.crumb{font-size:.85rem; display:flex; flex-wrap:wrap; gap:4px 14px}
+.crumb a{color:var(--accent)}
+h1{font-size:1.5rem; margin:0; letter-spacing:.04em; text-wrap:balance}
+.lead{margin:0; color:var(--muted); font-size:.92rem}
+h2{font-size:1rem; margin:0; letter-spacing:.04em}
+
+.tabs{display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--accent); border-radius:10px; overflow:hidden}
+.tabs button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:48px; font-size:1rem}
+.tabs button[aria-selected="true"]{background:var(--accent); color:var(--accent-fg)}
+
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0}
+.row{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+.label{font-size:.75rem; color:var(--muted); letter-spacing:.06em}
+.note{font-size:.85rem; color:var(--muted); margin:0}
+
+button{
+  font:inherit; font-weight:700; cursor:pointer;
+  border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg);
+  border-radius:8px; padding:9px 14px; min-height:44px;
+}
+button.sub{background:transparent; color:var(--accent)}
+button:disabled{opacity:.45; cursor:default}
+button:focus-visible, textarea:focus-visible, input:focus-visible{outline:3px solid var(--tone); outline-offset:2px}
+
+.seg{display:inline-grid; grid-auto-flow:column; border:1px solid var(--accent); border-radius:8px; overflow:hidden; max-width:100%}
+.seg button{border:0; border-radius:0; background:transparent; color:var(--accent); min-height:40px; padding:6px 12px; font-weight:400}
+.seg button[aria-pressed="true"]{background:var(--accent); color:var(--accent-fg); font-weight:700}
+
+input[type=text], textarea{
+  width:100%; font:inherit; font-size:1rem; line-height:1.6; padding:8px 12px;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg);
+}
+textarea{resize:vertical; min-height:8em}
+input[type=file]{display:none}
+.check{display:flex; align-items:center; gap:8px; font-size:.9rem}
+.check input{width:20px; height:20px; accent-color:var(--accent); flex:none}
+.msg{margin:0; font-size:.9rem; color:var(--ng)}
+.msg:empty{display:none}
+.okmsg{color:var(--ok)}
+
+/* ファイルの情報 */
+.info{display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:0; font-size:.92rem}
+.info dt{color:var(--muted); font-size:.8rem; padding-top:2px}
+.info dd{margin:0; min-width:0; word-break:break-all}
+.num{font-family:var(--font-num); font-variant-numeric:tabular-nums}
+.print{font-family:var(--font-num); font-weight:700; letter-spacing:.08em}
+
+/* パケットの升目 */
+.grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(30px, 1fr)); gap:4px}
+.cell{
+  position:relative; aspect-ratio:1; border-radius:5px; border:1px dashed var(--line); background:var(--chip);
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-num); font-size:.68rem; color:var(--muted); font-variant-numeric:tabular-nums; min-width:0;
+}
+.cell[data-s="ok"]{background:var(--ok); border:1px solid var(--ok); color:var(--accent-fg)}
+.cell[data-s="fixed"]{background:var(--fix); border:1px solid var(--fix); color:var(--accent-fg)}
+.cell[data-s="bad"]{background:transparent; border:2px solid var(--ng); color:var(--ng); font-weight:700}
+.cell[data-s="sent"]{opacity:.45}
+.cell.now{outline:3px solid var(--tone); outline-offset:1px; color:var(--fg)}
+.cell b{position:absolute; right:1px; bottom:0; font-size:.6rem; line-height:1.2}
+.legend{display:flex; flex-wrap:wrap; gap:4px 14px; font-size:.8rem; color:var(--muted)}
+.legend span::before{content:""; display:inline-block; width:.85em; height:.85em; border-radius:2px; margin-right:4px; vertical-align:-1px; background:var(--chip); border:1px dashed var(--line)}
+.legend .lok::before{background:var(--ok); border:0}
+.legend .lfix::before{background:var(--fix); border:0}
+.legend .lbad::before{background:transparent; border:2px solid var(--ng)}
+.counts{font-size:.9rem}
+.counts b{font-family:var(--font-num)}
+
+/* 受け取ったファイル */
+.result{border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--bg); display:flex; flex-direction:column; gap:10px}
+.verdict{font-size:1.15rem; font-weight:700; margin:0}
+.verdict.ok{color:var(--ok)} .verdict.ng{color:var(--ng)}
+pre.preview{margin:0; max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-all; font-family:var(--font-ui); font-size:.95rem; line-height:1.7; background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:10px 12px}
+
+/* 受け取る側 */
+.status{display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:999px; border:1px solid var(--line); font-weight:700; font-size:.9rem}
+.status::before{content:""; width:.6em; height:.6em; border-radius:50%; background:var(--muted)}
+.status[data-s="listen"]::before{background:var(--accent)}
+.status[data-s="sig"]::before, .status[data-s="recv"]::before{background:var(--tone)}
+.status[data-s="ok"]::before{background:var(--ok)}
+.status[data-s="ng"]::before{background:var(--ng)}
+.progress{height:6px; background:var(--chip); border-radius:3px; overflow:hidden}
+.progress i{display:block; height:100%; width:0%; background:var(--tone)}
+
+/* パケットの形の図 */
+.pbar{display:flex; height:30px; border-radius:6px; overflow:hidden; border:1px solid var(--line)}
+.pbar i{display:block; min-width:3px}
+.pkey{display:grid; grid-template-columns:auto 1fr; gap:4px 10px; font-size:.88rem; margin:0}
+.pkey dt{display:flex; align-items:center; gap:6px; white-space:nowrap; font-weight:700}
+.pkey dt::before{content:""; width:.9em; height:.9em; border-radius:2px; background:var(--c)}
+.pkey dd{margin:0; color:var(--muted)}
+
+ol.how, ul.how{margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:4px; font-size:.92rem}
+
+@media (prefers-reduced-motion: reduce){ body{transition:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="crumb"><a href="./">← 第1段階　音を見る</a><a href="okuru.html">第2段階　音で文字を送る</a><a href="e.html">第3段階　音で絵を送る</a></div>
+    <h1>音でファイルを送る</h1>
+    <p class="lead">音でデータを送る・第4段階　ファイルを小さな包み（パケット）に分け、壊れても直せる符号を付けて、1バイトも違わずに届けます</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="使い方の切り替え">
+    <button role="tab" id="tabSend" aria-selected="true" aria-controls="pSend">送る</button>
+    <button role="tab" id="tabRecv" aria-selected="false" aria-controls="pRecv">受け取る</button>
+  </div>
+
+  <!-- ===================== 送る ===================== -->
+  <section id="pSend" role="tabpanel" aria-labelledby="tabSend" class="wrap" style="gap:16px">
+    <div class="panel">
+      <div class="row">
+        <span class="label">送るもの</span>
+        <div class="seg" role="group" aria-label="送るもの" id="srcSeg">
+          <button aria-pressed="true" data-v="write">文字を書いて送る</button>
+          <button aria-pressed="false" data-v="pick">ファイルを選ぶ</button>
+        </div>
+      </div>
+      <div id="srcWrite" style="display:flex;flex-direction:column;gap:8px">
+        <label class="label" for="fname">ファイル名</label>
+        <input type="text" id="fname" value="音のテスト.txt" autocomplete="off">
+        <label class="label" for="txt">中身</label>
+        <textarea id="txt" rows="7">音でファイルを送るテストです。
+この文章が、1バイトも違わずに届けば成功です。
+
+・ファイルは64バイトずつの「パケット」に分けて送ります
+・パケットごとに、壊れても直せる符号を付けています
+・最後に、ファイル全体の「指紋」を比べて確かめます</textarea>
+      </div>
+      <div id="srcPick" class="row" hidden>
+        <button id="btnPick" class="sub">ファイルを選ぶ</button>
+        <input type="file" id="filePick">
+        <span class="note" id="pickName">まだ選んでいません。小さなファイル（数KBまで）がおすすめです。</span>
+      </div>
+      <label class="check"><input type="checkbox" id="optSqueeze" checked> ちぢめてから送る（文字のファイルは小さくなり、早く届きます）</label>
+
+      <dl class="info" id="sendInfo"></dl>
+      <p class="msg" id="sizeMsg" role="status"></p>
+
+      <div class="row">
+        <span class="label">音の高さ</span>
+        <div class="seg" role="group" aria-label="音の高さ" id="bandSeg"></div>
+      </div>
+      <div class="row">
+        <span class="label">速さ</span>
+        <div class="seg" role="group" aria-label="速さ" id="speedSeg"></div>
+      </div>
+      <div class="row">
+        <span class="label">くり返し</span>
+        <div class="seg" role="group" aria-label="くり返し" id="repSeg"></div>
+      </div>
+      <p class="note" id="repNote"></p>
+      <div class="row">
+        <button id="btnSend">音で送る</button>
+        <button id="btnStopSend" class="sub" disabled>止める</button>
+        <button id="btnLoop" class="sub">この端末だけで確かめる</button>
+      </div>
+      <p class="msg" id="sendMsg" role="status"></p>
+    </div>
+
+    <div class="panel" id="sendGridPanel">
+      <div class="row"><h2>送るパケット</h2><span class="note num" id="sendNow"></span></div>
+      <div class="grid" id="sendGrid" aria-label="送るパケットの並び"></div>
+      <p class="note">0番は「表紙」で、ファイル名と大きさ、ファイル全体の指紋が入っています。送っている間は、いま鳴っているパケットに枠が付きます。</p>
+    </div>
+
+    <div class="panel" id="loopPanel">
+      <h2>この端末だけで確かめる</h2>
+      <p class="note">音を鳴らさずに、この端末の中だけで送って受け取ります。部屋の反響と、選んだ物音を混ぜて、実際の5倍くらいの速さで進めます。</p>
+      <div class="row">
+        <span class="label">物音（手をたたく音など）</span>
+        <div class="seg" role="group" aria-label="物音" id="noiseSeg"></div>
+      </div>
+      <p class="note" id="loopMsg" role="status"></p>
+      <div id="loopView"></div>
+    </div>
+
+    <div class="panel">
+      <h2>パケット1つの形</h2>
+      <p class="note">どのパケットも同じ形です。音の長さの割合で並べています。</p>
+      <div class="pbar" id="pbar" aria-hidden="true"></div>
+      <dl class="pkey">
+        <dt style="--c:var(--sig)">合図</dt><dd>「ここからパケット」の印。高さで速さも伝えます</dd>
+        <dt style="--c:var(--muted)">同期</dt><dd>決まった6つの音。ここで1つ1つの音の区切りを合わせ直します</dd>
+        <dt style="--c:var(--num)">番号</dt><dd>ファイルの番号・パケットの番号・全部の数（3バイト）</dd>
+        <dt style="--c:var(--body)">中身</dt><dd>ファイルの64バイト分（音128個）</dd>
+        <dt style="--c:var(--chk)">検査</dt><dd>CRC-16。直したあと、本当に合っているかを確かめます</dd>
+        <dt style="--c:var(--fix)">直す符号</dt><dd>リード・ソロモン符号16バイト。どこが壊れても8バイトまで元に戻せます</dd>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ===================== 受け取る ===================== -->
+  <section id="pRecv" role="tabpanel" aria-labelledby="tabRecv" class="wrap" style="gap:16px" hidden>
+    <div class="panel">
+      <div class="row">
+        <button id="btnListen">受け取りを開始</button>
+        <span class="status" id="status" data-s="off">止まっています</span>
+      </div>
+      <p class="msg" id="recvMsg" role="alert"></p>
+      <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+      <div id="rxView"></div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="試し方">
+    <h2>試し方</h2>
+    <ol class="how">
+      <li>まず「この端末だけで確かめる」を押します。音を鳴らさずに、この端末の中だけで送って受け取ります。物音を「たくさん」にすると、壊れたパケットを符号で直す様子が見られます。</li>
+      <li>次に2台で試します。1台目で「受け取る」を開いて「受け取りを開始」を押し、2台目で「音で送る」を押します。速さと音の高さは合図で伝わるので、受け取る側で選ぶ必要はありません。</li>
+      <li>送っている間は、2台を動かさずに置いておきます。うまくいかないときは、近づける、音量を上げる、速さを「ゆっくり」にする、の順に試してください。</li>
+      <li>直せなかったパケットは赤い枠で残ります。くり返しを「2回」や「止めるまで」にしておくと、次の周で埋まります。</li>
+    </ol>
+    <h2>ファイルが1バイトも違わないと言える理由</h2>
+    <ul class="how">
+      <li><b>パケットごとの検査</b>…どのパケットも、直したあとにCRC-16で確かめます。合わないパケットは使いません。</li>
+      <li><b>ファイル全体の指紋</b>…送る側は、ファイル全体からCRC-32という8けたの「指紋」を計算して表紙に入れます。受け取った側でも同じ計算をして、一致すれば同じファイルです。両方の画面に出る指紋を見比べてみてください。</li>
+    </ul>
+    <p class="note">リード・ソロモン符号は、QRコード・CD・宇宙探査機の通信にも使われている、壊れても直せるしくみです。QRコードが少し汚れても読めるのと同じことを、音でしています。</p>
+  </section>
+
+</div>
+
+<script>
+// ===CORE START===
+/* ============================================================
+   しくみの中心（画面とは関係ない計算の部分）
+   ファイル → パケットに分ける → 直すための符号を付ける → 16の高さの音 → 空気
+   → マイク → 16の高さを聞き分ける → 符号で直す → 検査 → 並べ直す → ファイル
+   ============================================================ */
+
+// ---- 使う音の高さ -------------------------------------------
+// 第2段階は2つの高さ（0か1か）。ここでは16の高さを使い、1回の音で4ビット（0〜15）を送る。
+// 1バイト（8ビット）＝ 音2つ。高さは100Hzおきに16個並べる。
+//   合図（パケットの始まり）は、16の高さより下の別の高さ。合図の高さで速さを伝える。
+const FBANDS = [
+  { id: 'audible', name: '聞こえる音',   base: 1300,  step: 100, pre: [700, 900, 1100],
+    ramp: 0.006,
+    hp: 400,                // 受け取るとき、これより低い音（エアコン・車などのうなり）を取り除く
+    minRms: 0.0005 },
+  { id: 'quiet',   name: '聞こえない音', base: 17700, step: 100, pre: [16900, 17100, 17300],
+    ramp: 0.020,            // 鳴らし始め・終わりをそっとする（急に鳴らすとスピーカーが「プツッ」と鳴る）
+    hp: 15000,              // 受け取るとき、これより低い音（話し声・物音）を取り除く
+    minRms: 0.0002 },
+];
+function toneHz(band, k) { return band.base + band.step * k; }
+// 速さ：1つの音の長さ T。受け取る側は、音の頭（反響が残る部分）を skip だけ飛ばし、L の長さだけ聞く。
+//   L を 0.01秒の倍数にすると、100Hzおきの16の高さがおたがいに混ざらずに聞き分けられる。
+const FSPEEDS = [
+  { id: 'slow',   name: 'ゆっくり', T: 0.040, skip: 0.008,  L: 0.030, i: 0 },
+  { id: 'normal', name: 'ふつう',   T: 0.025, skip: 0.004,  L: 0.020, i: 1 },
+  { id: 'fast',   name: 'はやい',   T: 0.015, skip: 0.0035, L: 0.010, i: 2 },
+];
+const PRE_SEC = 0.16;         // パケットごとの合図の長さ（秒）
+const FIRST_PRE_SEC = 0.35;   // いちばん最初の合図だけ長くする
+const F_AMP = 0.5;
+const F_GLIDE = 0.0005;       // 高さを切り替えるときに、なめらかに移る時間
+const SYNC_SYMS = [15, 0, 10, 5, 12, 3];   // 同期の目印（合図のあとの決まった6つの音）
+
+// ---- パケットの形 -------------------------------------------
+//   [ファイル番号 1][パケット番号 1][全部の数 1][中身 64][検査 CRC-16 2] [直すための符号 16]
+//   0番のパケットは「表紙」：ファイル名・大きさ・ファイル全体の指紋（CRC-32）
+const PAYLOAD = 64;
+const NSYM = 16;                              // 直すための符号のバイト数（8バイトまで直せる）
+const KLEN = 3 + PAYLOAD + 2;                 // 69
+const NLEN = KLEN + NSYM;                     // 85 バイト ＝ 音170個
+const NSYMS_PKT = SYNC_SYMS.length + NLEN * 2;
+const MAX_PKTS = 255;                         // 表紙1 ＋ 中身254
+const MAX_SEND = (MAX_PKTS - 1) * PAYLOAD;    // 16256 バイト
+const NAME_MAX = 52;
+
+// ---- 検査用の数（CRC）----------------------------------------
+function crc16(bytes) {                       // CRC-16/CCITT。パケットごとの検査
+  let c = 0xffff;
+  for (const b of bytes) {
+    c ^= b << 8;
+    for (let i = 0; i < 8; i++) c = (c & 0x8000) ? ((c << 1) ^ 0x1021) & 0xffff : (c << 1) & 0xffff;
+  }
+  return c;
+}
+const CRC32_T = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes) {                       // CRC-32。ファイル全体の指紋（ZIPと同じ計算）
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC32_T[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function hex32(v) { const s = v.toString(16).toUpperCase().padStart(8, '0'); return s.slice(0, 4) + ' ' + s.slice(4); }
+
+// ---- リード・ソロモン符号（QRコード・CD・宇宙探査機と同じ）---------
+// 0〜255 の数だけで足し算・掛け算が閉じる「ガロア体 GF(256)」の上で計算する。
+// 中身の後ろに16バイトの符号を付けると、どこが壊れたか分からなくても、8バイトまで元に戻せる。
+const GF_EXP = new Uint8Array(512), GF_LOG = new Uint8Array(256);
+(() => {
+  let x = 1;
+  for (let i = 0; i < 255; i++) { GF_EXP[i] = x; GF_LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+})();
+function gfMul(a, b) { return (a === 0 || b === 0) ? 0 : GF_EXP[GF_LOG[a] + GF_LOG[b]]; }
+function gfInv(a) { return GF_EXP[255 - GF_LOG[a]]; }
+function gfPowA(n) { return GF_EXP[((n % 255) + 255) % 255]; }   // α の n 乗
+// 符号を作るもとの式 g(x) = (x-α^0)(x-α^1)…(x-α^15)。係数は高い次数から
+const RS_GEN = (() => {
+  let g = [1];
+  for (let i = 0; i < NSYM; i++) {
+    const r = new Array(g.length + 1).fill(0);
+    for (let j = 0; j < g.length; j++) { r[j] ^= g[j]; r[j + 1] ^= gfMul(g[j], GF_EXP[i]); }
+    g = r;
+  }
+  return g;
+})();
+function rsEncode(msg) {                      // msg（69バイト）→ msg ＋ 符号16バイト
+  const out = new Uint8Array(msg.length + NSYM);
+  out.set(msg);
+  for (let i = 0; i < msg.length; i++) {
+    const c = out[i];
+    if (c) for (let j = 1; j < RS_GEN.length; j++) out[i + j] ^= gfMul(RS_GEN[j], c);
+  }
+  out.set(msg);
+  return out;
+}
+// 受け取った85バイトを直す。直せたら { bytes, fixed: 直した数 }、直せなければ null
+// 配列の k 番目は、多項式の x^(n-1-k) の係数として扱う
+function rsDecode(cw) {
+  const n = cw.length;
+  const S = new Array(NSYM);
+  let bad = false;
+  for (let j = 0; j < NSYM; j++) {            // 症状（シンドローム）：壊れていなければ全部0
+    const a = GF_EXP[j]; let y = 0;
+    for (let k = 0; k < n; k++) y = gfMul(y, a) ^ cw[k];
+    S[j] = y; if (y) bad = true;
+  }
+  if (!bad) return { bytes: Uint8Array.from(cw), fixed: 0 };
+  // バーレカンプ・マッシー法：壊れた場所を表す式 Λ(x) を求める（係数は低い次数から）
+  let lam = [1], B = [1], L = 0, m = 1, b = 1;
+  for (let r = 0; r < NSYM; r++) {
+    let d = S[r];
+    for (let i = 1; i <= L; i++) d ^= gfMul(lam[i] || 0, S[r - i]);
+    if (d === 0) { m++; continue; }
+    const coef = gfMul(d, gfInv(b));
+    const next = lam.slice();
+    while (next.length < B.length + m) next.push(0);
+    for (let i = 0; i < B.length; i++) next[i + m] ^= gfMul(coef, B[i]);
+    if (2 * L <= r) { B = lam; L = r + 1 - L; b = d; m = 1; } else m++;
+    lam = next;
+  }
+  while (lam.length > 1 && lam[lam.length - 1] === 0) lam.pop();
+  if (lam.length - 1 !== L || 2 * L > NSYM) return null;
+  const evalLow = (p, x) => { let y = 0; for (let i = p.length - 1; i >= 0; i--) y = gfMul(y, x) ^ p[i]; return y; };
+  // チェン探索：Λ(α^-p) = 0 になる p が壊れた場所
+  const pos = [];
+  for (let p = 0; p < n; p++) if (evalLow(lam, gfPowA(-p)) === 0) pos.push(p);
+  if (pos.length !== L) return null;
+  // フォーニーの式：壊れた量を求める
+  const om = new Array(NSYM).fill(0);         // Ω(x) = S(x)Λ(x) mod x^16
+  for (let i = 0; i < NSYM; i++) for (let j = 0; j < lam.length && i + j < NSYM; j++) om[i + j] ^= gfMul(S[i], lam[j]);
+  const dlam = [];                            // Λ'(x)（2で割り切れる項は消える）
+  for (let i = 1; i < lam.length; i++) dlam.push(i & 1 ? lam[i] : 0);
+  const out = Uint8Array.from(cw);
+  for (const p of pos) {
+    const X = gfPowA(p), Xi = gfPowA(-p);
+    const den = evalLow(dlam, Xi);
+    if (den === 0) return null;
+    out[n - 1 - p] ^= gfMul(gfMul(X, evalLow(om, Xi)), gfInv(den));
+  }
+  for (let j = 0; j < NSYM; j++) {            // 直したあと、症状が全部0になったか確かめる
+    const a = GF_EXP[j]; let y = 0;
+    for (let k = 0; k < n; k++) y = gfMul(y, a) ^ out[k];
+    if (y) return null;
+  }
+  return { bytes: out, fixed: L };
+}
+
+// ---- ファイル → パケット --------------------------------------
+const enc8 = new TextEncoder();
+function cutName(name) {                      // ファイル名を52バイト以内に（文字の途中で切らない）
+  const out = [];
+  for (const ch of name) {
+    const b = enc8.encode(ch);
+    if (out.length + b.length > NAME_MAX) break;
+    out.push(...b);
+  }
+  return out;
+}
+// data: 実際に送るバイト（ちぢめたあと）、info: { name, size（元の大きさ）, crc（元の指紋）, packed（ちぢめたか） }
+function makePackets(data, info, fileId) {
+  const nData = Math.ceil(data.length / PAYLOAD);
+  const total = nData + 1;
+  if (total > MAX_PKTS) throw new Error('too big');
+  const head = new Uint8Array(PAYLOAD);
+  const nm = cutName(info.name);
+  head[0] = 0x40 | (info.packed ? 1 : 0);
+  head[1] = info.size >>> 24; head[2] = (info.size >>> 16) & 255; head[3] = (info.size >>> 8) & 255; head[4] = info.size & 255;
+  head[5] = data.length >>> 8; head[6] = data.length & 255;
+  head[7] = info.crc >>> 24; head[8] = (info.crc >>> 16) & 255; head[9] = (info.crc >>> 8) & 255; head[10] = info.crc & 255;
+  head[11] = nm.length; head.set(nm, 12);
+  const pkts = [];
+  for (let idx = 0; idx < total; idx++) {
+    const m = new Uint8Array(KLEN);
+    m[0] = fileId; m[1] = idx; m[2] = total;
+    if (idx === 0) m.set(head, 3);
+    else m.set(data.subarray((idx - 1) * PAYLOAD, idx * PAYLOAD), 3);
+    const c = crc16(m.subarray(0, 3 + PAYLOAD));
+    m[3 + PAYLOAD] = c >>> 8; m[4 + PAYLOAD] = c & 255;
+    pkts.push(rsEncode(m));
+  }
+  return pkts;
+}
+function readHead(p) {                        // 表紙のパケットの中身を読む
+  if ((p[0] & 0xf0) !== 0x40) return null;
+  const size = ((p[1] << 24) | (p[2] << 16) | (p[3] << 8) | p[4]) >>> 0;
+  const sent = (p[5] << 8) | p[6];
+  const crc = ((p[7] << 24) | (p[8] << 16) | (p[9] << 8) | p[10]) >>> 0;
+  const nl = Math.min(p[11], NAME_MAX);
+  const name = new TextDecoder('utf-8').decode(p.subarray(12, 12 + nl));
+  return { packed: !!(p[0] & 1), size, sent, crc, name };
+}
+// 集めたパケットを並べ直す。そろっていなければ null
+function joinPackets(head, parts, total) {
+  if (!head) return null;
+  for (let i = 1; i < total; i++) if (!parts[i]) return null;
+  const out = new Uint8Array(head.sent);
+  for (let i = 1; i < total; i++) {
+    const at = (i - 1) * PAYLOAD;
+    out.set(parts[i].subarray(0, Math.min(PAYLOAD, head.sent - at)), at);
+  }
+  return out;
+}
+
+// ---- パケット → 音の波 ----------------------------------------
+// 合図 → 同期の6音 → 85バイト（1バイト＝音2つ、上の4ビットが先）。
+// 高さを切り替えるときに波を途切れさせず、すべるように移すので「プツッ」が出にくい。
+function packetSymbols(cw) {
+  const s = SYNC_SYMS.slice();
+  for (const b of cw) s.push(b >> 4, b & 15);
+  return s;
+}
+function packetSec(sp, band, first) { return (first ? FIRST_PRE_SEC : PRE_SEC) + NSYMS_PKT * sp.T + band.ramp; }
+function synthPacket(cw, sp, band, sr, first) {
+  const syms = packetSymbols(cw);
+  const nPre = Math.round((first ? FIRST_PRE_SEC : PRE_SEC) * sr);
+  const edge = (i) => nPre + Math.round(i * sp.T * sr);
+  const nEnd = edge(syms.length);
+  const nTail = Math.round(band.ramp * sr);
+  const ramp = Math.round(band.ramp * sr);
+  const k = 1 - Math.exp(-1 / (F_GLIDE * sr));
+  const out = new Float32Array(nEnd + nTail);
+  const fPre = band.pre[sp.i];
+  let phase = 0, si = 0, fNow = fPre;
+  for (let n = 0; n < out.length; n++) {
+    let f;
+    if (n < nPre) f = fPre;
+    else if (n < nEnd) { while (n >= edge(si + 1)) si++; f = toneHz(band, syms[si]); }
+    else f = toneHz(band, syms[syms.length - 1]);
+    fNow += (f - fNow) * k;
+    phase += 2 * Math.PI * fNow / sr;
+    if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+    let a = F_AMP;
+    if (n < ramp) a *= n / ramp;
+    if (n >= nEnd) a *= 1 - (n - nEnd) / nTail;
+    out[n] = a * Math.sin(phase);
+  }
+  return out;
+}
+
+// ---- 低い音を取り除くフィルタ（第2段階と同じ）--------------------
+class HighPass {
+  constructor(fc, sr) {
+    const w = 2 * Math.PI * fc / sr, cs = Math.cos(w), al = Math.sin(w) / (2 * Math.SQRT1_2);
+    const a0 = 1 + al;
+    this.c = [(1 + cs) / 2 / a0, -(1 + cs) / a0, (1 + cs) / 2 / a0, -2 * cs / a0, (1 - al) / a0];
+    this.st = [[0, 0, 0, 0], [0, 0, 0, 0]];
+  }
+  run(x) {
+    const [b0, b1, b2, a1, a2] = this.c;
+    let y = Float32Array.from(x);
+    for (const s of this.st) {
+      const out = new Float32Array(y.length);
+      for (let n = 0; n < y.length; n++) {
+        const v = y[n];
+        const o = b0 * v + b1 * s[0] + b2 * s[1] - a1 * s[2] - a2 * s[3];
+        s[1] = s[0]; s[0] = v; s[3] = s[2]; s[2] = o;
+        out[n] = o;
+      }
+      y = out;
+    }
+    return y;
+  }
+}
+function fbandOk(band, sr) { return toneHz(band, 15) + 500 < sr / 2; }
+
+// ---- 決まった高さの強さを測る（ゲルツェル法）-------------------
+function goertzel(x, start, len, f, sr) {
+  const c = 2 * Math.cos(2 * Math.PI * f / sr);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < len; i++) {
+    const s0 = x[start + i] + c * s1 - s2;
+    s2 = s1; s1 = s0;
+  }
+  return s1 * s1 + s2 * s2 - c * s1 * s2;
+}
+function energy(x, start, len) {
+  let e = 0;
+  for (let i = 0; i < len; i++) e += x[start + i] * x[start + i];
+  return e;
+}
+
+// ---- 受け取る仕組み ------------------------------------------
+// 1. 0.01秒ずつ区切って、合図の音を探す（0.05秒続いたら合図）
+// 2. 合図が途切れたところの前後をずらしながら、同期の6音がいちばんはっきり聞こえる位置を探す
+//    （同期の6音が読めなければ、合図に似た物音だったとして、すぐ次を探す）
+// 3. その位置から170個の音を読み、16の高さのどれが鳴っているかで4ビットずつ戻す
+// 4. リード・ソロモン符号で直し、CRC-16で確かめる
+// 5. 次の合図を探しに戻る（パケットごとにタイミングを合わせ直すので、長いファイルでもずれない）
+class FileReceiver {
+  constructor(sr, on, band) {
+    this.sr = sr; this.on = on; this.band = band;
+    this.hp = band.hp ? new HighPass(band.hp, sr) : null;
+    this.buf = new Float32Array(sr * 8);
+    this.len = 0; this.base = 0;
+    this.win = Math.round(0.01 * sr);
+    this.scan = 0;
+    this.tones = Array.from({ length: 16 }, (_, k) => toneHz(band, k));
+    this.reset();
+  }
+  reset() { this.state = 'idle'; this.cand = null; this.count = 0; this.sp = null; this.edge = 0; this.startWins = 0; this.found = null; }
+  get end() { return this.base + this.len; }
+  at(abs) { return abs - this.base; }
+  append(chunk) {
+    if (this.len + chunk.length > this.buf.length) {
+      const nb = new Float32Array(Math.max(this.buf.length * 2, this.len + chunk.length));
+      nb.set(this.buf.subarray(0, this.len));
+      this.buf = nb;
+    }
+    this.buf.set(chunk, this.len);
+    this.len += chunk.length;
+  }
+  trim(keepFrom) {
+    const k = keepFrom - this.base;
+    if (k <= 0) return;
+    this.buf.copyWithin(0, k, this.len);
+    this.len -= k; this.base += k;
+  }
+  push(chunk) {
+    this.append(this.hp ? this.hp.run(chunk) : chunk);
+    for (;;) {
+      while (this.state !== 'data' && this.scan + this.win <= this.end) { this.step(this.scan); this.scan += this.win; }
+      if (this.state !== 'data' || !this.tryDecode()) break;
+    }
+    if (this.state === 'idle') this.trim(this.scan - Math.round(0.3 * this.sr));
+  }
+  step(abs) {
+    const i = this.at(abs), n = this.win, sr = this.sr, x = this.buf, B = this.band;
+    const e = energy(x, i, n);
+    const rms = Math.sqrt(e / n);
+    // 合図の3つの高さと、データの16の高さ、それぞれの強さを測る
+    // 割合：決まった19の高さの中で、合図の高さがどれだけ目立つか。
+    //   雑音はどの高さにも同じくらい入るので、雑音が多くても合図の高さだけが目立つ（第2段階より雑音に強い）
+    const pre = FSPEEDS.map(s => goertzel(x, i, n, B.pre[s.i], sr));
+    let sum = 0, top = 0;
+    for (const p of pre) sum += p;
+    for (const f of this.tones) { const p = goertzel(x, i, n, f, sr); sum += p; if (p > top) top = p; }
+    let bi = 0;
+    for (let k = 1; k < pre.length; k++) if (pre[k] > pre[bi]) bi = k;
+    const best = FSPEEDS[bi];
+    const share = sum > 0 ? pre[bi] / sum : 0;
+    this.on('level', { band: B, sig: share, rms });
+    if (this.state === 'idle') {
+      if (rms > B.minRms && share > 0.45) {
+        if (this.cand === best) this.count++; else { this.cand = best; this.count = 1; }
+        if (this.count >= 5) { this.state = 'start'; this.sp = best; this.startWins = 0; this.on('start', { speed: best, band: B }); }
+      } else if (this.count > 0) this.count--;      // 一瞬の物音では数え直さない
+      else this.cand = null;
+    } else if (this.state === 'start') {
+      this.startWins++;
+      const mine = sum > 0 ? pre[this.sp.i] / sum : 0;
+      // 合図が弱まり、データの高さのどれかがはっきり鳴り始めた ＝ データの始まり
+      // （手をたたく音のように、どの高さにも広がる物音では、ここを始まりと思わない）
+      if ((mine < 0.4 && top / sum > 0.25) || rms < B.minRms) { this.state = 'data'; this.edge = abs; }
+      else if (this.startWins > 150) { this.on('lost', { band: B, msg: '合図の音が長く続きすぎています。' }); this.reset(); }
+    }
+  }
+  // 1つの音の中で、16の高さそれぞれの強さを測る
+  powers(s, len) {
+    const p = new Float64Array(16);
+    for (let k = 0; k < 16; k++) p[k] = goertzel(this.buf, s, len, this.tones[k], this.sr);
+    return p;
+  }
+  tryDecode() {
+    const sr = this.sr, sp = this.sp, T = sp.T * sr;
+    const skip = Math.round(sp.skip * sr), L = Math.round(sp.L * sr);
+    const symAt = (off, i) => this.at(this.edge + off + Math.round(i * T)) + skip;
+    // 同期の6音がそろったら、先に位置合わせだけする（合図に似た物音なら、ここですぐ見切る）
+    if (!this.found) {
+      const lo = -2 * this.win - Math.round(T / 2), hi = this.win + Math.round(T);
+      if (this.end < this.edge + hi + Math.round(SYNC_SYMS.length * T) + 1) return false;
+      let best = null;
+      const stepN = Math.max(1, Math.round(T / 16));
+      for (let off = lo; off <= hi; off += stepN) {
+        if (symAt(off, 0) < 0) continue;
+        let share = 0, hit = 0;
+        for (let i = 0; i < SYNC_SYMS.length; i++) {
+          const p = this.powers(symAt(off, i), L);
+          let sum = 0, top = 0; for (let k = 0; k < 16; k++) { sum += p[k]; if (p[k] > p[top]) top = k; }
+          share += sum > 0 ? p[SYNC_SYMS[i]] / sum : 0;
+          if (top === SYNC_SYMS[i]) hit++;
+        }
+        if (hit >= 5 && (!best || share > best.share)) best = { off, share };
+      }
+      if (!best) {
+        const next = this.edge + this.win;
+        this.on('lost', { band: this.band, speed: sp, msg: '合図のあとの音が読めませんでした。' });
+        this.reset(); this.scan = next;
+        return true;
+      }
+      this.found = best;
+      this.on('sync', { band: this.band, speed: sp });
+    }
+    const best = this.found;
+    const after = this.edge + best.off + Math.round(NSYMS_PKT * T);
+    if (this.end < after + 1) {
+      this.on('progress', { band: this.band, speed: sp, frac: Math.max(0, (this.end - this.edge) / (after - this.edge)) });
+      return false;
+    }
+    // 170個の音を読む
+    const cw = new Uint8Array(NLEN);
+    let q = 0;
+    for (let i = 0; i < NLEN * 2; i++) {
+      const p = this.powers(symAt(best.off, SYNC_SYMS.length + i), L);
+      let a = 0, b2 = -1;
+      for (let k = 1; k < 16; k++) if (p[k] > p[a]) a = k;
+      for (let k = 0; k < 16; k++) if (k !== a && (b2 < 0 || p[k] > p[b2])) b2 = k;
+      q += (p[a] - p[b2]) / (p[a] + p[b2] + 1e-12);
+      if (i & 1) cw[i >> 1] |= a; else cw[i >> 1] = a << 4;
+    }
+    const res = rsDecode(cw);
+    let ok = false, m = null;
+    if (res) {
+      m = res.bytes.subarray(0, KLEN);
+      const c = crc16(m.subarray(0, 3 + PAYLOAD));
+      ok = c === ((m[3 + PAYLOAD] << 8) | m[4 + PAYLOAD]);
+    }
+    const src = ok ? m : cw;                  // 直せなかったときも、番号は「たぶん」として渡す
+    const next = after - this.win;            // 次の合図を探し始める位置
+    this.on('packet', {
+      band: this.band, speed: sp, ok, fixed: ok ? res.fixed : -1, quality: q / (NLEN * 2),
+      fileId: src[0], idx: src[1], total: src[2],
+      payload: ok ? Uint8Array.from(m.subarray(3, 3 + PAYLOAD)) : null,
+    });
+    this.reset(); this.scan = next;
+    return true;
+  }
+}
+// ===CORE END===
+
+/* ============================================================
+   画面の部分
+   ============================================================ */
+const $ = (id) => document.getElementById(id);
+let ctx = null;
+function ensureCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return ctx;
+}
+// iPhone の消音モードでも「聞こえない音」は鳴らす（第2段階と同じ）
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (_) {}
+}
+
+// ---- タブ ---------------------------------------------------
+function showTab(which) {
+  const send = which === 'send';
+  $('tabSend').setAttribute('aria-selected', String(send));
+  $('tabRecv').setAttribute('aria-selected', String(!send));
+  $('pSend').hidden = !send;
+  $('pRecv').hidden = send;
+}
+$('tabSend').addEventListener('click', () => showTab('send'));
+$('tabRecv').addEventListener('click', () => showTab('recv'));
+if (location.hash === '#ukeru') showTab('recv');
+
+// ---- 小さな道具 ---------------------------------------------
+function fmtBytes(n) {
+  if (n < 1024) return n.toLocaleString() + 'バイト';
+  return (n / 1024).toFixed(n < 10240 ? 1 : 0) + 'KB（' + n.toLocaleString() + 'バイト）';
+}
+function fmtSec(s) {
+  s = Math.max(1, Math.round(s));
+  if (s < 60) return s + '秒';
+  return Math.floor(s / 60) + '分' + (s % 60 ? (s % 60) + '秒' : '');
+}
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function segment(box, items, cur, onPick) {
+  box.textContent = '';
+  for (const it of items) {
+    const b = el('button', null, it.name);
+    b.setAttribute('aria-pressed', String(it === cur));
+    b.addEventListener('click', () => {
+      box.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      onPick(it);
+    });
+    box.appendChild(b);
+  }
+}
+function makeGrid(box, total) {
+  box.textContent = '';
+  const cells = [];
+  for (let i = 0; i < total; i++) {
+    const c = el('div', 'cell', i === 0 ? '表' : String(i));
+    c.title = i === 0 ? '0番：表紙（ファイル名・大きさ・指紋）' : i + '番';
+    box.appendChild(c); cells.push(c);
+  }
+  return cells;
+}
+
+// ---- ちぢめる・元に戻す（ブラウザに入っている deflate を使う）--------
+async function squeeze(bytes) {
+  if (!window.CompressionStream) return null;
+  try {
+    const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(s).arrayBuffer());
+  } catch (_) { return null; }
+}
+async function unsqueeze(bytes) {
+  if (!window.DecompressionStream) throw new Error('nodecomp');
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+/* ============================================================
+   送る側
+   ============================================================ */
+let srcMode = 'write';
+let picked = null;            // 選んだファイル { name, bytes }
+let band = FBANDS[1];
+let speed = FSPEEDS[1];
+const REPS = [
+  { name: '1回', n: 1 },
+  { name: '2回', n: 2 },
+  { name: '止めるまで', n: Infinity },
+];
+let rep = REPS[1];
+let prep = null;              // 送る準備ができたファイル
+let prepToken = 0;
+
+segment($('bandSeg'), FBANDS, band, (b) => { band = b; showInfo(); });
+segment($('speedSeg'), FSPEEDS, speed, (s) => { speed = s; showInfo(); });
+segment($('repSeg'), REPS, rep, (r) => { rep = r; showInfo(); });
+
+$('srcSeg').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+  srcMode = b.dataset.v;
+  $('srcSeg').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  $('srcWrite').hidden = srcMode !== 'write';
+  $('srcWrite').style.display = srcMode === 'write' ? 'flex' : 'none';
+  $('srcPick').hidden = srcMode !== 'pick';
+  prepare();
+}));
+$('btnPick').addEventListener('click', () => $('filePick').click());
+$('filePick').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  if (f.size > 4 * 1024 * 1024) { picked = null; $('pickName').textContent = f.name + ' は大きすぎます。'; prepare(); return; }
+  picked = { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) };
+  $('pickName').textContent = f.name;
+  prepare();
+});
+let prepTimer = 0;
+const prepareSoon = () => { clearTimeout(prepTimer); prepTimer = setTimeout(prepare, 150); };
+$('txt').addEventListener('input', prepareSoon);
+$('fname').addEventListener('input', prepareSoon);
+$('optSqueeze').addEventListener('change', prepare);
+
+async function prepare() {
+  const tok = ++prepToken;
+  let name, raw;
+  if (srcMode === 'write') { name = $('fname').value.trim() || 'メモ.txt'; raw = enc8.encode($('txt').value); }
+  else if (picked) { name = picked.name; raw = picked.bytes; }
+  else { prep = null; showInfo(); return; }
+  let sent = raw, packed = false;
+  if ($('optSqueeze').checked && raw.length > 0) {
+    const z = await squeeze(raw);
+    if (tok !== prepToken) return;
+    // パケットの数が減るときだけ、ちぢめたものを送る
+    if (z && Math.ceil(z.length / PAYLOAD) < Math.ceil(raw.length / PAYLOAD)) { sent = z; packed = true; }
+  }
+  prep = { name, raw, sent, packed, crc: crc32(raw), total: Math.ceil(sent.length / PAYLOAD) + 1 };
+  showInfo();
+}
+function roundSec(p, sp, bd) { return packetSec(sp, bd, true) + (p.total - 1) * packetSec(sp, bd, false); }
+
+let sendCells = [];
+function showInfo() {
+  const box = $('sendInfo');
+  box.textContent = '';
+  const add = (k, v, cls) => { box.appendChild(el('dt', null, k)); const d = el('dd', cls, v); box.appendChild(d); return d; };
+  const msg = $('sizeMsg');
+  msg.textContent = '';
+  let can = !!prep;
+  if (!prep) {
+    add('ファイル', srcMode === 'pick' ? 'まだ選んでいません' : '—');
+  } else if (prep.raw.length === 0) {
+    add('ファイル', prep.name);
+    msg.textContent = '中身が空です。何か書くか、ファイルを選んでください。';
+    can = false;
+  } else {
+    add('ファイル名', prep.name);
+    add('大きさ', fmtBytes(prep.raw.length), 'num');
+    if ($('optSqueeze').checked) add('ちぢめると', prep.packed
+      ? fmtBytes(prep.sent.length) + '（' + Math.round(prep.sent.length / prep.raw.length * 100) + '%）'
+      : 'あまり小さくならないので、そのまま送ります', prep.packed ? 'num' : null);
+    if (prep.sent.length > MAX_SEND) {
+      msg.textContent = '大きすぎて送れません。送れるのは' + (prep.packed ? 'ちぢめたあとで' : '') + fmtBytes(MAX_SEND) + 'までです。';
+      can = false;
+    } else {
+      add('パケット', '表紙1 ＋ 中身' + (prep.total - 1) + ' ＝ ' + prep.total + '個', 'num');
+      add('かかる時間', '1周 約' + fmtSec(roundSec(prep, speed, band)) + '（' + speed.name + '）', 'num');
+    }
+    add('指紋（CRC-32）', hex32(prep.crc), 'print');
+  }
+  $('repNote').textContent = rep.n === 1
+    ? '1周だけ送ります。直せないほど壊れたパケットがあると、ファイルはそろいません。'
+    : rep.n === 2 ? '同じものを2周送ります。1周目で壊れたパケットを、2周目で埋められます。'
+    : '「止める」を押すまで、何周でも送り続けます。離れた場所や物音の多い場所向きです。';
+  $('btnSend').disabled = !can || !!playing || !!loopRun;
+  $('btnLoop').disabled = !can || !!playing;
+  if (!playing) {
+    sendCells = can ? makeGrid($('sendGrid'), prep.total) : [];
+    if (!can) $('sendGrid').textContent = '';
+    $('sendNow').textContent = '';
+  }
+}
+
+// ---- パケットの形の図 ----------------------------------------
+(function drawPacketBar() {
+  const sp = FSPEEDS[1];
+  const parts = [
+    ['var(--sig)', PRE_SEC], ['var(--muted)', SYNC_SYMS.length * sp.T], ['var(--num)', 6 * sp.T],
+    ['var(--body)', PAYLOAD * 2 * sp.T], ['var(--chk)', 4 * sp.T], ['var(--fix)', NSYM * 2 * sp.T],
+  ];
+  for (const [c, w] of parts) { const i = el('i'); i.style.background = c; i.style.flexGrow = String(w); $('pbar').appendChild(i); }
+})();
+
+// ---- 音で送る -----------------------------------------------
+// パケットを1つずつ音にして、少し先まで順番に鳴らす予約を入れていく（長いファイルでも端末の負担が増えない）
+let playing = null;
+async function send() {
+  if (!prep || playing) return;
+  if (!listening) setAudioSession(band.id === 'quiet' ? 'playback' : 'auto');
+  ensureCtx(); await ctx.resume();
+  if (!fbandOk(band, ctx.sampleRate)) {
+    $('sendMsg').textContent = 'この端末の音の設定（' + ctx.sampleRate + 'Hz）では、聞こえない音を鳴らせません。Bluetoothのイヤホンなどを外してください。';
+    return;
+  }
+  $('sendMsg').textContent = '';
+  const fileId = 1 + Math.floor(Math.random() * 255);
+  const pkts = makePackets(prep.sent, { name: prep.name, size: prep.raw.length, crc: prep.crc, packed: prep.packed }, fileId);
+  playing = { pkts, sp: speed, bd: band, max: rep.n * pkts.length, n: 0, t: ctx.currentTime + 0.1, items: [], srcs: [], timer: 0 };
+  sendCells = makeGrid($('sendGrid'), pkts.length);
+  schedule();
+  playing.timer = setInterval(schedule, 300);
+  $('btnSend').disabled = true; $('btnStopSend').disabled = false; $('btnLoop').disabled = true;
+  requestAnimationFrame(tickSend);
+}
+function schedule() {
+  const p = playing;
+  if (!p) return;
+  const total = p.pkts.length;
+  while (p.n < p.max && p.t - ctx.currentTime < 2.5) {
+    const idx = p.n % total;
+    const w = synthPacket(p.pkts[idx], p.sp, p.bd, ctx.sampleRate, p.n === 0);
+    const buf = ctx.createBuffer(1, w.length, ctx.sampleRate);
+    buf.copyToChannel(w, 0);
+    const s = ctx.createBufferSource();
+    s.buffer = buf; s.connect(ctx.destination); s.start(p.t);
+    p.srcs.push(s);
+    p.items.push({ t0: p.t, t1: p.t + buf.duration, idx, round: Math.floor(p.n / total) });
+    p.t += buf.duration; p.n++;
+  }
+  const now = ctx.currentTime;
+  p.items = p.items.filter(it => it.t1 > now - 1);
+  p.srcs = p.srcs.slice(-8);
+  if (p.n >= p.max && now > p.t + 0.1) endSend(true);
+}
+function tickSend() {
+  const p = playing;
+  if (!p) return;
+  const now = ctx.currentTime;
+  const it = p.items.find(x => x.t0 <= now && now < x.t1);
+  sendCells.forEach((c, i) => {
+    c.classList.toggle('now', !!it && i === it.idx);
+    c.dataset.s = it && i < it.idx ? 'sent' : '';
+  });
+  if (it) $('sendNow').textContent = (it.round + 1) + '周目　' + (it.idx === 0 ? '表紙' : it.idx + '番') + ' / 全' + p.pkts.length + '個';
+  requestAnimationFrame(tickSend);
+}
+function endSend(finished) {
+  const p = playing;
+  if (!p) return;
+  clearInterval(p.timer);
+  for (const s of p.srcs) { try { s.stop(); } catch (_) {} }
+  playing = null;
+  if (!listening) setAudioSession('auto');
+  sendCells.forEach(c => { c.classList.remove('now'); c.dataset.s = ''; });
+  $('btnStopSend').disabled = true;
+  $('sendMsg').textContent = '';
+  $('sendNow').textContent = finished === true ? '送り終わりました' : '止めました';
+  showInfo();
+}
+$('btnSend').addEventListener('click', send);
+$('btnStopSend').addEventListener('click', () => endSend(false));
+
+/* ============================================================
+   受け取った結果を見せる部分（「受け取る」と「確かめる」で共通）
+   ============================================================ */
+function makeRxView(root, opts) {
+  root.textContent = '';
+  const info = el('dl', 'info');
+  const grid = el('div', 'grid');
+  const legend = el('div', 'legend');
+  legend.innerHTML = '<span>待っている</span><span class="lok">届いた</span><span class="lfix">直して届いた（数字は直したバイト数）</span><span class="lbad">壊れていた（次の周で待つ）</span>';
+  const counts = el('div', 'counts');
+  const result = el('div', 'result'); result.hidden = true;
+  root.append(info, grid, legend, counts, result);
+  grid.hidden = legend.hidden = true;
+
+  let cur = null;                // いま集めているファイル
+  let cells = [];
+  let lastStart = 0;
+  const files = new Map();
+
+  function showInfo() {
+    info.textContent = '';
+    if (!cur) { info.appendChild(el('dt', null, '状態')); info.appendChild(el('dd', null, opts.waitText)); return; }
+    const add = (k, v, cls) => { info.appendChild(el('dt', null, k)); info.appendChild(el('dd', cls, v)); };
+    if (cur.head) {
+      add('ファイル名', cur.head.name || '（名前なし）');
+      add('大きさ', fmtBytes(cur.head.size) + (cur.head.packed ? '（ちぢめて ' + fmtBytes(cur.head.sent) + ' で届きます）' : ''), 'num');
+      add('送った側の指紋', hex32(cur.head.crc), 'print');
+    } else {
+      add('ファイル名', '表紙（0番）を待っています');
+    }
+    add('パケット', cur.total + '個', 'num');
+  }
+  function showCounts() {
+    if (!cur) { counts.textContent = ''; return; }
+    const got = cur.got;
+    counts.innerHTML = '届いた <b>' + got + '</b> / ' + cur.total
+      + '　直したバイト <b>' + cur.fixed + '</b>'
+      + (cur.bad ? '　壊れていた <b>' + cur.bad + '</b>' : '');
+  }
+  function newFile(id, total) {
+    const f = { id, total, parts: [], head: null, state: new Array(total).fill(''), fixedAt: [], got: 0, fixed: 0, bad: 0, t0: lastStart || opts.now(), done: false };
+    files.set(id, f);
+    return f;
+  }
+  function select(f) {
+    cur = f;
+    grid.hidden = legend.hidden = false;
+    cells = makeGrid(grid, f.total);
+    f.state.forEach((s, i) => paint(i));
+    result.hidden = true; result.textContent = '';
+    showInfo(); showCounts();
+  }
+  function paint(i) {
+    const c = cells[i]; if (!c) return;
+    const s = cur.state[i];
+    c.dataset.s = s;
+    c.textContent = i === 0 ? '表' : String(i);
+    if (s === 'fixed') { const b = el('b', null, String(cur.fixedAt[i])); c.appendChild(b); }
+  }
+  async function finish(f) {
+    f.done = true;
+    const joined = joinPackets(f.head, f.parts, f.total);
+    const sec = opts.now() - f.t0;
+    result.hidden = false; result.textContent = '';
+    let bytes = joined, err = '';
+    if (f.head.packed) {
+      try { bytes = await unsqueeze(joined); }
+      catch (e) { bytes = null; err = e.message === 'nodecomp' ? 'この端末のブラウザでは、ちぢめたファイルを元に戻せません。ブラウザを新しくしてください。' : 'ちぢめたファイルを元に戻せませんでした。'; }
+    }
+    if (f !== cur) return;
+    const v = el('p', 'verdict');
+    result.appendChild(v);
+    if (!bytes) { v.classList.add('ng'); v.textContent = err; opts.onDone && opts.onDone(false); return; }
+    const crc = crc32(bytes);
+    const same = crc === f.head.crc && bytes.length === f.head.size;
+    v.classList.add(same ? 'ok' : 'ng');
+    v.textContent = same ? '1バイトも違わずに届きました' : '指紋が合いません（どこかが違います）';
+    const dl = el('dl', 'info');
+    const add = (k, val, cls) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', cls, val)); };
+    add('受け取った指紋', hex32(crc) + (same ? '　＝ 送った側と同じ' : '　≠ 送った側 ' + hex32(f.head.crc)), 'print');
+    add('大きさ', fmtBytes(bytes.length) + (f.head.packed ? '（ちぢめて ' + fmtBytes(joined.length) + ' で届き、元に戻しました）' : ''), 'num');
+    if (opts.showTime) add('かかった時間', '約' + fmtSec(sec) + '・1秒あたり約' + Math.max(1, Math.round(bytes.length / Math.max(1, sec))) + 'バイト', 'num');
+    add('直したバイト', f.fixed + 'バイト（' + f.total + '個のパケットの中で）', 'num');
+    result.appendChild(dl);
+    // 文字のファイルなら中身を見せる
+    let text = null;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (/\u0000/.test(text)) text = null; } catch (_) {}
+    const actions = el('div', 'row');
+    const bSave = el('button', null, 'ファイルを保存する');
+    actions.appendChild(bSave);
+    let file = null;
+    const name = f.head.name || ('oto-file-' + Date.now());
+    const type = text != null ? 'text/plain' : 'application/octet-stream';
+    try { file = new File([bytes], name, { type }); } catch (_) {}
+    const blob = new Blob([bytes], { type });
+    bSave.addEventListener('click', () => saveFile(file, blob, name));
+    if (text != null) {
+      const bCopy = el('button', 'sub', '文字をコピー');
+      bCopy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(text); bCopy.textContent = 'コピーしました'; }
+        catch (_) { bCopy.textContent = 'コピーできませんでした'; }
+        setTimeout(() => { bCopy.textContent = '文字をコピー'; }, 2000);
+      });
+      actions.appendChild(bCopy);
+    }
+    result.appendChild(actions);
+    if (text != null) {
+      const pre = el('pre', 'preview');
+      pre.textContent = text.length > 4000 ? text.slice(0, 4000) + '\n…（ここまで表示）' : text;
+      result.appendChild(pre);
+    } else {
+      result.appendChild(el('p', 'note', '文字のファイルではないため、中身は表示しません。保存してから開いてください。'));
+    }
+    opts.onDone && opts.onDone(same);
+  }
+
+  showInfo();
+  return {
+    get current() { return cur; },
+    reset() { files.clear(); cur = null; cells = []; grid.textContent = ''; grid.hidden = legend.hidden = true; result.hidden = true; result.textContent = ''; showInfo(); showCounts(); },
+    on(type, d) {
+      if (type === 'start') { if (!lastStart) lastStart = opts.now() - PRE_SEC; return; }   // かかった時間を、最初の合図から数える
+      if (type === 'lost') { lastStart = 0; return; }
+      if (type !== 'packet') return;
+      if (d.ok) {
+        if (d.idx >= d.total) return;
+        let f = files.get(d.fileId);
+        if (f && f.total !== d.total) { files.delete(d.fileId); f = null; }
+        if (!f) f = newFile(d.fileId, d.total);
+        if (f !== cur) select(f);
+        lastStart = 0;
+        if (f.done || f.parts[d.idx] || (d.idx === 0 && f.head)) return;   // もう届いている
+        if (d.idx === 0) { f.head = readHead(d.payload); if (!f.head) return; f.parts[0] = d.payload; showInfo(); }
+        else f.parts[d.idx] = d.payload;
+        f.got++;
+        f.fixed += d.fixed;
+        f.fixedAt[d.idx] = d.fixed;
+        f.state[d.idx] = d.fixed > 0 ? 'fixed' : 'ok';
+        paint(d.idx); showCounts();
+        if (f.got === f.total) finish(f);
+      } else if (cur && !cur.done && d.fileId === cur.id && d.total === cur.total && d.idx < cur.total && !cur.state[d.idx]) {
+        // 直せなかったパケット。番号は壊れているかもしれないが、今のファイルと合うなら赤い枠を付ける
+        cur.state[d.idx] = 'bad'; cur.bad++;
+        paint(d.idx); showCounts();
+      } else if (cur && !cur.done) {
+        cur.bad++; showCounts();
+      }
+    },
+  };
+}
+
+// ---- 保存（第3段階と同じく、スマホは共有メニュー、PCはダウンロード）----
+function saveFile(file, blob, name) {
+  const phone = matchMedia('(pointer: coarse)').matches;
+  if (phone && file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file], title: name }).catch((e) => { if (e && e.name !== 'AbortError') download(blob, name); });
+    return;
+  }
+  download(blob, name);
+}
+function download(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.download = name; a.href = url;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+/* ============================================================
+   この端末だけで確かめる
+   作った音に、反響・雑音・物音を混ぜて、受け取り役に渡す（音は鳴らさない）。
+   実際の5倍くらいの速さで進める。
+   ============================================================ */
+const NOISES = [
+  { name: 'なし',     rate: 0,  amp: 0 },
+  { name: 'ときどき', rate: 3,  amp: 3 },
+  { name: 'たくさん', rate: 7,  amp: 3.5 },
+];
+let noise = NOISES[1];
+segment($('noiseSeg'), NOISES, noise, (n) => { noise = n; });
+
+// 部屋のまねをする：反響（壁ではね返った音）・ざーという雑音・低いうなり・パチッという物音
+class SimRoom {
+  constructor(sr, nz) {
+    this.sr = sr; this.nz = nz; this.n = 0;
+    this.d1 = Math.round(0.006 * sr); this.d2 = Math.round(0.017 * sr);
+    this.hist = new Float32Array(this.d2);
+    this.burst = null;
+  }
+  gauss() { let u = 0; for (let i = 0; i < 6; i++) u += Math.random(); return (u - 3) * Math.SQRT2; }
+  run(x) {
+    const { d1, d2, sr } = this, H = this.hist, y = new Float32Array(x.length);
+    const past = (n, d) => n >= d ? x[n - d] : H[H.length - d + n];
+    for (let n = 0; n < x.length; n++) {
+      let v = 0.4 * (x[n] + 0.25 * past(n, d1) + 0.12 * past(n, d2));
+      v += 0.01 * this.gauss() + 0.05 * Math.sin(2 * Math.PI * 150 * this.n / sr);
+      if (!this.burst && this.nz.rate && Math.random() < this.nz.rate / sr) {
+        this.burst = { i: 0, len: Math.round((0.015 + Math.random() * 0.045) * sr), amp: this.nz.amp * (0.5 + Math.random() * 0.7) };
+      }
+      if (this.burst) {
+        const b = this.burst;
+        v += b.amp * Math.exp(-4 * b.i / b.len) * this.gauss();
+        if (++b.i >= b.len) this.burst = null;
+      }
+      y[n] = v; this.n++;
+    }
+    if (x.length >= d2) H.set(x.subarray(x.length - d2));
+    else { H.copyWithin(0, x.length); H.set(x, d2 - x.length); }
+    return y;
+  }
+}
+
+let loopRun = null;
+let loopSamples = 0;
+const loopView = makeRxView($('loopView'), {
+  waitText: '始めると、ここにパケットが届きます',
+  now: () => loopSamples / 48000,
+  showTime: true,
+  onDone: (ok) => { if (loopRun) { loopRun.stopAt = loopSamples + 4800; } },
+});
+function loopTest() {
+  if (loopRun) { stopLoop('やめました。'); return; }
+  if (!prep) return;
+  const sr = 48000, sp = speed, bd = band;
+  const pkts = makePackets(prep.sent, { name: prep.name, size: prep.raw.length, crc: prep.crc, packed: prep.packed }, 1 + Math.floor(Math.random() * 255));
+  const max = (rep.n === Infinity ? 6 : rep.n) * pkts.length;
+  const room = new SimRoom(sr, noise);
+  loopSamples = 0;
+  loopView.reset();
+  $('loopMsg').textContent = '';
+  let n = 0;
+  let q = room.run(new Float32Array(Math.round(0.3 * sr))), qi = 0;    // 始まる前の静けさ
+  const rs = FBANDS.map(b => new FileReceiver(sr, (t, d) => {
+    if (t === 'start') $('loopMsg').textContent = '合図を受け取りました（' + d.band.name + '・' + d.speed.name + '）';
+    if (t === 'packet') $('loopMsg').textContent = (d.ok ? (d.idx === 0 ? '表紙' : d.idx + '番') + 'のパケットが届きました' + (d.fixed > 0 ? '（' + d.fixed + 'バイト直しました）' : '') : '直せないほど壊れたパケットがありました');
+    loopView.on(t, d);
+  }, b));
+  const STEP = 8192;
+  loopRun = { stopAt: Infinity, timer: 0 };
+  loopRun.timer = setInterval(() => {
+    // 足りなくなったら、次のパケットを音にして部屋を通す
+    while (q.length - qi < STEP && n < max) {
+      const w = room.run(synthPacket(pkts[n % pkts.length], sp, bd, sr, n === 0));
+      const nq = new Float32Array(q.length - qi + w.length);
+      nq.set(q.subarray(qi)); nq.set(w, q.length - qi);
+      q = nq; qi = 0; n++;
+    }
+    if (q.length - qi < STEP && n >= max) {
+      const tail = room.run(new Float32Array(Math.round(0.4 * sr)));
+      for (const r of rs) { r.push(q.subarray(qi)); r.push(tail); }
+      const f = loopView.current;
+      stopLoop(f && f.done ? null : '送り終わりましたが、そろわなかったパケットがあります。くり返しを「2回」や「止めるまで」にすると、次の周で埋まります。');
+      return;
+    }
+    const ch = q.subarray(qi, qi + STEP); qi += STEP; loopSamples += STEP;
+    for (const r of rs) r.push(ch);
+    if (loopSamples >= loopRun.stopAt) stopLoop(n < max ? 'ファイルがそろったので、残りの周は省きました。' : null);
+  }, 35);
+  $('btnLoop').textContent = 'やめる';
+  $('btnSend').disabled = true;
+  $('loopPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function stopLoop(msg) {
+  if (!loopRun) return;
+  clearInterval(loopRun.timer); loopRun = null;
+  if (msg) $('loopMsg').textContent = msg;
+  else if (loopView.current && loopView.current.done) $('loopMsg').textContent = '受け取り終わりました。';
+  $('btnLoop').textContent = 'この端末だけで確かめる';
+  showInfo();
+}
+$('btnLoop').addEventListener('click', loopTest);
+
+/* ============================================================
+   受け取る
+   ============================================================ */
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  constructor(){ super(); this.b = new Float32Array(2048); this.n = 0; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      this.b[this.n++] = ch[i];
+      if (this.n === 2048) { this.port.postMessage(this.b.slice(0)); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('oto-tap', Tap);`;
+let workletReady = false;
+let listening = null;
+function setStatus(s, text) { const e = $('status'); e.dataset.s = s; e.textContent = text; }
+const rxView = makeRxView($('rxView'), {
+  waitText: '「受け取りを開始」を押して、送る側で「音で送る」を押してください',
+  now: () => performance.now() / 1000,
+  showTime: true,
+  onDone: (ok) => { setStatus(ok ? 'ok' : 'ng', ok ? '受け取りました' : '指紋が合いません'); if (ok) flash(); later(4000); },
+});
+
+async function openTap(stream, onChunk) {
+  const src = ctx.createMediaStreamSource(stream);
+  const sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
+  try {
+    if (!ctx.audioWorklet) throw new Error('no worklet');
+    if (!workletReady) {
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      workletReady = true;
+    }
+    const node = new AudioWorkletNode(ctx, 'oto-tap');
+    node.port.onmessage = (e) => onChunk(e.data);
+    src.connect(node); node.connect(sink);
+    return () => { src.disconnect(); node.disconnect(); sink.disconnect(); };
+  } catch (_) {
+    const sp = ctx.createScriptProcessor(2048, 1, 1);
+    sp.onaudioprocess = (e) => onChunk(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(sp); sp.connect(sink);
+    return () => { src.disconnect(); sp.disconnect(); sink.disconnect(); };
+  }
+}
+
+async function startListen() {
+  $('recvMsg').textContent = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $('recvMsg').textContent = 'このページではマイクが使えません。https のページで開いてください。';
+    return;
+  }
+  setAudioSession('play-and-record');
+  ensureCtx(); await ctx.resume();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) {
+    $('recvMsg').textContent = e.name === 'NotAllowedError'
+      ? 'マイクの使用が許可されませんでした。アドレス欄のマイク表示から許可してください。'
+      : 'マイクを開けませんでした（' + e.name + '）。';
+    return;
+  }
+  const rxs = FBANDS.filter(bd => fbandOk(bd, ctx.sampleRate)).map(bd => new FileReceiver(ctx.sampleRate, onRx, bd));
+  if (rxs.length < FBANDS.length) $('recvMsg').textContent = 'この端末の音の設定（' + ctx.sampleRate + 'Hz）では、聞こえない音は受け取れません。聞こえる音だけ待ちます。';
+  const close = await openTap(stream, (c) => { for (const r of rxs) r.push(c); });
+  listening = { stream, close };
+  $('btnListen').textContent = '受け取りを止める';
+  setStatus('listen', '合図を待っています');
+}
+function stopListen() {
+  if (!listening) return;
+  listening.close();
+  listening.stream.getTracks().forEach(t => t.stop());
+  listening = null;
+  setAudioSession('auto');
+  $('btnListen').textContent = '受け取りを開始';
+  setStatus('off', '止まっています');
+  $('prog').style.width = '0%';
+}
+$('btnListen').addEventListener('click', () => listening ? stopListen() : startListen());
+
+function onRx(type, d) {
+  if (type === 'level') return;
+  rxView.on(type, d);
+  const f = rxView.current;
+  const busy = f && !f.done;
+  if (type === 'start' && !busy) setStatus('sig', '合図かもしれない音');
+  if (type === 'sync') setStatus('recv', '受け取り中（' + d.band.name + '・' + d.speed.name + '）');
+  if (type === 'progress') $('prog').style.width = Math.min(100, d.frac * 100).toFixed(0) + '%';
+  if (type === 'lost') { if (!busy) later(0); }           // 合図に似た物音だった。何もなかったことにする
+  if (type === 'packet') {
+    $('prog').style.width = '0%';
+    if (d.ok && f && !f.done) setStatus('recv', (d.idx === 0 ? '表紙' : d.idx + '番') + 'が届きました' + (d.fixed > 0 ? '（' + d.fixed + 'バイト直しました）' : ''));
+    if (!d.ok && busy) setStatus('ng', '直せないほど壊れたパケットがありました。次の周を待ちます');
+    if (!f || f.done) later(1500);
+  }
+}
+let laterTimer = 0;
+function later(ms) {
+  clearTimeout(laterTimer);
+  laterTimer = setTimeout(() => { if (listening) { const f = rxView.current; if (!f || f.done) setStatus('listen', '合図を待っています'); $('prog').style.width = '0%'; } }, ms);
+}
+function flash() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { document.body.classList.add('flash'); setTimeout(() => document.body.classList.remove('flash'), 800); return; }
+  let k = 0;
+  const t = setInterval(() => { document.body.classList.toggle('flash'); if (++k >= 6) { clearInterval(t); document.body.classList.remove('flash'); } }, 180);
+}
+
+// ---- はじめの表示 -------------------------------------------
+prepare();
+if (!window.isSecureContext) $('recvMsg').textContent = 'https ではないため、マイクが使えない可能性があります。';
+</script>
+<p id="offlineState" style="max-width:720px;margin:8px auto 24px;padding:0 16px;font-size:.8rem;color:var(--muted)"></p>
+<script>
+/* オフライン対応：一度開くとページを端末にしまい、圏外でも開けるようにする（中身は sw.js） */
+(function () {
+  const el = document.getElementById('offlineState');
+  const show = () => {
+    if (!('serviceWorker' in navigator)) { el.textContent = ''; return; }
+    const ready = !!navigator.serviceWorker.controller;
+    if (!navigator.onLine) el.textContent = ready ? 'いまはネットにつながっていません。端末にしまってあるページで動いています。' : '';
+    else el.textContent = ready ? 'このページは端末にしまってあります。ネットがなくても開けます。' : '';
+  };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(show).catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', show);
+  }
+  addEventListener('online', show); addEventListener('offline', show);
+  show();
+})();
+</script>
+</body>
+</html>

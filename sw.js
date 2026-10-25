@@ -9,7 +9,7 @@
   - 書体（Google Fonts）… 一度読んだ分をしまっておき、次からはそれを使う。
   ページを直したら、下の VERSION を1つ上げると、古いしまい物が片付きます。
 */
-const VERSION = 'v6';
+const VERSION = 'v7';
 const PAGES = 'oto-pages-' + VERSION;
 const FONTS = 'oto-fonts-' + VERSION;
 const CORE = [
@@ -17,6 +17,7 @@ const CORE = [
   './index.html',
   './okuru.html',
   './e.html',
+  './file.html',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
